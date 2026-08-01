@@ -1,0 +1,175 @@
+use serde_json::json;
+use sf_radar::digest::{bucket_for, render, Bucket, DigestEntry};
+use sf_radar::score::{score_business, score_permit};
+
+#[test]
+fn business_food_naics_scores_two() {
+    let row = json!({
+        "dba_name": "MISSION TACOS",
+        "ownership_name": "MISSION TACOS",
+        "lic_code_description": "Some Other License",
+        "self_reported_naics_code": "722511",
+    });
+    let (score, reasons) = score_business(&row);
+    assert_eq!(score, 2);
+    assert!(reasons.iter().any(|r| r.contains("food service")));
+}
+
+#[test]
+fn business_food_license_keyword_scores_two() {
+    let row = json!({
+        "dba_name": "",
+        "ownership_name": "",
+        "lic_code_description": "Catering Food Facility",
+        "self_reported_naics_code": "999999",
+    });
+    let (score, reasons) = score_business(&row);
+    assert_eq!(score, 2);
+    assert!(reasons.iter().any(|r| r.contains("food service")));
+}
+
+#[test]
+fn business_retail_naics_scores_two() {
+    for naics in ["441110", "459999"] {
+        let row = json!({
+            "dba_name": "",
+            "ownership_name": "",
+            "lic_code_description": "General",
+            "self_reported_naics_code": naics,
+        });
+        let (score, reasons) = score_business(&row);
+        assert_eq!(score, 2, "NAICS {naics} should be retail");
+        assert!(reasons.iter().any(|r| r.contains("retail")));
+    }
+}
+
+#[test]
+fn business_unrelated_naics_scores_zero() {
+    let row = json!({
+        "dba_name": "",
+        "ownership_name": "",
+        "lic_code_description": "General Contractor",
+        "self_reported_naics_code": "236220",
+    });
+    let (score, _) = score_business(&row);
+    assert_eq!(score, 0);
+}
+
+#[test]
+fn business_dba_different_from_owner_adds_one() {
+    let row = json!({
+        "dba_name": "Bob's Burgers",
+        "ownership_name": "Belcher Holdings LLC",
+        "lic_code_description": "Restaurant",
+        "self_reported_naics_code": "",
+    });
+    let (score, reasons) = score_business(&row);
+    assert_eq!(score, 3);
+    assert!(reasons.iter().any(|r| r.contains("differs from owner")));
+}
+
+#[test]
+fn permit_keyword_hit_scores_two() {
+    let row = json!({
+        "description": "Interior remodel for existing office",
+        "proposed_use": "",
+        "estimated_cost": "",
+    });
+    let (score, _) = score_permit(&row);
+    assert_eq!(score, 0);
+
+    let row = json!({
+        "description": "Interior remodel for a new coffee shop",
+        "proposed_use": "",
+        "estimated_cost": "",
+    });
+    let (score, reasons) = score_permit(&row);
+    assert!(score >= 2);
+    assert!(reasons.iter().any(|r| r.contains("coffee")));
+}
+
+#[test]
+fn permit_signals_stack() {
+    let row = json!({
+        "description": "Tenant improvement: change of use to restaurant",
+        "proposed_use": "Restaurant",
+        "estimated_cost": "250000.0",
+    });
+    let (score, reasons) = score_permit(&row);
+    // keyword +2, change of use +1, tenant improvement +1, proposed use +1, cost +1
+    assert_eq!(score, 6);
+    assert_eq!(reasons.len(), 5);
+}
+
+#[test]
+fn permit_estimated_cost_threshold() {
+    let row = json!({
+        "description": "minor repairs",
+        "proposed_use": "",
+        "estimated_cost": "100000.0",
+    });
+    assert_eq!(score_permit(&row).0, 0, "exactly 100k should not score");
+
+    let row = json!({
+        "description": "minor repairs",
+        "proposed_use": "",
+        "estimated_cost": "100000.01",
+    });
+    assert_eq!(score_permit(&row).0, 1);
+}
+
+#[test]
+fn bucket_boundaries() {
+    assert_eq!(bucket_for(0), None);
+    assert_eq!(bucket_for(1), None);
+    assert_eq!(bucket_for(2), Some(Bucket::Watch));
+    assert_eq!(bucket_for(3), Some(Bucket::Watch));
+    assert_eq!(bucket_for(4), Some(Bucket::Strong));
+    assert_eq!(bucket_for(9), Some(Bucket::Strong));
+}
+
+fn entry(name: &str, hood: &str, date: &str, score: u32) -> DigestEntry {
+    DigestEntry {
+        source: "business",
+        id: name.to_string(),
+        name: name.to_string(),
+        address: "1 Market St".to_string(),
+        date: date.to_string(),
+        neighborhood: hood.to_string(),
+        score,
+        reasons: vec!["test reason".to_string()],
+    }
+}
+
+#[test]
+fn digest_groups_by_bucket_then_neighborhood() {
+    let entries = vec![
+        entry("weak", "Mission", "2026-07-01", 1), // filtered out
+        entry("watch-sunset", "Sunset", "2026-07-02", 2),
+        entry("strong-mission", "Mission", "2026-07-03", 5),
+        entry("watch-mission", "Mission", "2026-07-04", 3),
+    ];
+
+    let text = render(&entries, 2, false, 7);
+    let strong = text.find("🔥 Strong signals").unwrap();
+    let watch = text.find("👀 Worth watching").unwrap();
+    assert!(strong < watch, "strong bucket should come first");
+    assert!(!text.contains("weak —"), "below min-score entries are filtered");
+
+    // within the watch bucket, Mission sorts before Sunset
+    let watch_section = &text[watch..];
+    assert!(watch_section.find("Mission").unwrap() < watch_section.find("Sunset").unwrap());
+    assert!(text.contains("3 new signal(s)."));
+
+    let md = render(&entries, 2, true, 7);
+    assert!(md.contains("## 🔥 Strong signals"));
+    assert!(md.contains("### Mission"));
+    assert!(md.contains("- **strong-mission**"));
+}
+
+#[test]
+fn digest_min_score_filter() {
+    let entries = vec![entry("low", "Mission", "2026-07-01", 2)];
+    let text = render(&entries, 4, false, 7);
+    assert!(text.contains("No new signals."));
+}
