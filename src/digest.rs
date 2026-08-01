@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 #[derive(Debug, Clone)]
 pub struct DigestEntry {
-    pub source: &'static str, // "business" | "permit"
+    pub source: String, // source key, e.g. "business" | "permit" | "health"
     pub id: String,
     pub name: String,
     pub address: String,
@@ -52,13 +52,13 @@ fn format_entry(entry: &DigestEntry, markdown: bool) -> String {
     };
     if markdown {
         format!(
-            "- **{}** — {} — {} — score {}\n  - {}",
-            entry.name, address, entry.date, entry.score, reasons
+            "- **[{}] {}** — {} — {} — score {}\n  - {}",
+            entry.source, entry.name, address, entry.date, entry.score, reasons
         )
     } else {
         format!(
-            "  {} — {}\n    {} · score {} · {}",
-            entry.name, address, entry.date, entry.score, reasons
+            "  [{}] {} — {}\n    {} · score {} · {}",
+            entry.source, entry.name, address, entry.date, entry.score, reasons
         )
     }
 }

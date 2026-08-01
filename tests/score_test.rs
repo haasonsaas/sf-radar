@@ -1,6 +1,9 @@
 use serde_json::json;
 use sf_radar::digest::{bucket_for, render, Bucket, DigestEntry};
-use sf_radar::score::{score_business, score_permit};
+use sf_radar::score::{
+    score_business, score_electrical, score_entertainment, score_mobile_food, score_permit,
+    score_plumbing,
+};
 
 #[test]
 fn business_food_naics_scores_two() {
@@ -130,7 +133,7 @@ fn bucket_boundaries() {
 
 fn entry(name: &str, hood: &str, date: &str, score: u32) -> DigestEntry {
     DigestEntry {
-        source: "business",
+        source: "business".to_string(),
         id: name.to_string(),
         name: name.to_string(),
         address: "1 Market St".to_string(),
@@ -164,7 +167,7 @@ fn digest_groups_by_bucket_then_neighborhood() {
     let md = render(&entries, 2, true, 7);
     assert!(md.contains("## 🔥 Strong signals"));
     assert!(md.contains("### Mission"));
-    assert!(md.contains("- **strong-mission**"));
+    assert!(md.contains("- **[business] strong-mission**"));
 }
 
 #[test]
@@ -172,4 +175,58 @@ fn digest_min_score_filter() {
     let entries = vec![entry("low", "Mission", "2026-07-01", 2)];
     let text = render(&entries, 4, false, 7);
     assert!(text.contains("No new signals."));
+}
+
+#[test]
+fn entertainment_scores_base_plus_license() {
+    let row = json!({"dba_name": "Club X", "license_type": ""});
+    let (score, reasons) = score_entertainment(&row);
+    assert_eq!(score, 2);
+    assert!(reasons.iter().any(|r| r.contains("entertainment venue")));
+
+    let row = json!({"dba_name": "Club X", "license_type": "Limited Live Performance"});
+    let (score, reasons) = score_entertainment(&row);
+    assert_eq!(score, 3);
+    assert!(reasons.iter().any(|r| r.contains("Limited Live Performance")));
+}
+
+#[test]
+fn mobile_food_scores_truck_bonus() {
+    let row = json!({"applicant": "Taco Cart", "facilitytype": "Push Cart"});
+    assert_eq!(score_mobile_food(&row).0, 2);
+
+    let row = json!({"applicant": "Taco Truck", "facilitytype": "Truck"});
+    let (score, reasons) = score_mobile_food(&row);
+    assert_eq!(score, 3);
+    assert!(reasons.iter().any(|r| r.contains("food truck")));
+}
+
+#[test]
+fn electrical_keyword_and_valuation() {
+    let row = json!({"description": "office wiring", "permit_valuation": "10000"});
+    assert_eq!(score_electrical(&row).0, 0);
+
+    let row = json!({"description": "new kitchen circuits for restaurant", "permit_valuation": "75000"});
+    let (score, reasons) = score_electrical(&row);
+    assert_eq!(score, 3); // keyword +2, valuation > 50k +1
+    assert!(reasons.iter().any(|r| r.contains("kitchen")));
+    assert!(reasons.iter().any(|r| r.contains("restaurant")));
+
+    let row = json!({"description": "bakery panel upgrade", "permit_valuation": "50000"});
+    assert_eq!(score_electrical(&row).0, 2, "exactly 50k should not add valuation point");
+}
+
+#[test]
+fn plumbing_grease_keyword() {
+    let row = json!({"description": "install grease interceptor", "valuation": ""});
+    let (score, reasons) = score_plumbing(&row);
+    assert_eq!(score, 2);
+    assert!(reasons.iter().any(|r| r.contains("grease")));
+
+    let row = json!({"description": "install grease trap for new cafe", "valuation": "60000"});
+    assert_eq!(score_plumbing(&row).0, 3);
+
+    let row = json!({"description": "water heater replacement", "valuation": "80000"});
+    let (score, _) = score_plumbing(&row);
+    assert_eq!(score, 1, "valuation alone scores 1, below the storage threshold");
 }

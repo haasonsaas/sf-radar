@@ -2,12 +2,19 @@
 
 A CLI that scans San Francisco public filings for early signs of new restaurants, cafes, and stores opening — before they show up on Yelp or Google Maps.
 
-It continuously pulls two SF open-data sources:
+Rows from multiple SF open-data sources are deduped into a local SQLite database (one generic `signals` table), scored with simple heuristics, and rendered as a digest grouped by signal strength and neighborhood.
 
-- **Registered Business Locations** (`g8m3-pdis`) — new DBAs, NAICS codes, neighborhoods
-- **Building Permits** (`i98e-djp9`) — tenant improvements, change-of-use, buildout costs
+## Data sources
 
-Rows are deduped into a local SQLite database, scored with simple heuristics (food/retail NAICS codes, permit keywords like "restaurant" or "tenant improvement", buildout cost), and rendered as a digest grouped by signal strength and neighborhood.
+| Key | Socrata dataset | What it signals |
+| --- | --- | --- |
+| `business` | `g8m3-pdis` Registered Business Locations | New DBAs, food/retail NAICS codes |
+| `permit` | `i98e-djp9` Building Permits | Tenant improvements, change-of-use, buildout costs |
+| `entertainment` | `76g9-59eq` Places of Entertainment | New venues (snapshot dataset, no date field — new rows surface on first appearance) |
+| `health` | `tvy3-wexg` Health Inspections 2024+ | A business's first health inspection on record — usually means it's about to open |
+| `mobile_food` | `rqzj-sfat` Mobile Food Facility Permits | New food trucks and carts |
+| `electrical` | `ftty-kx6y` Electrical Permits | Kitchen/restaurant wiring buildouts |
+| `plumbing` | `a6aw-rudh` Plumbing Permits | Grease traps and restaurant plumbing buildouts |
 
 ## Usage
 
@@ -37,13 +44,37 @@ Data is stored in `~/.local/share/sf-radar/radar.db` (override with `--db`). If 
 
 | Command | What it does |
 | --- | --- |
-| `sf-radar fetch [--full] [--since DATE]` | Incrementally pull new filings; `--full` backfills 90 days |
-| `sf-radar digest [--days N] [--min-score N] [--neighborhood NAME] [--md]` | Score unseen rows and print the digest |
+| `sf-radar fetch [--full] [--since DATE]` | Incrementally pull all sources; `--full` backfills 90 days |
+| `sf-radar digest [--days N] [--min-score N] [--neighborhood NAME] [--md]` | Print unseen signals and mark them seen |
 | `sf-radar init` | Create the database (auto-run by other commands) |
 
 ## How scoring works
 
 - **Business registrations**: +2 for food-service (NAICS 722x) or retail (NAICS 44/45) filings, +1 when the DBA name differs from the ownership entity
-- **Permits**: +2 for description keywords (restaurant, cafe, coffee, bakery, bar, boba, retail, storefront…), +1 for "change of use" / "tenant improvement", +1 for a restaurant/retail proposed use, +1 for buildout cost over $100k
+- **Building permits**: +2 for description keywords (restaurant, cafe, coffee, bakery, bar, boba, retail, storefront…), +1 for "change of use" / "tenant improvement", +1 for a restaurant/retail proposed use, +1 for buildout cost over $100k
+- **Entertainment venues**: +2 base, +1 when a license type is listed
+- **Health inspections**: +3 for a permit number's first inspection on record (routine re-inspections are dropped at ingest)
+- **Mobile food**: +2 base, +1 for trucks
+- **Electrical / plumbing permits**: +2 for buildout keywords (restaurant, kitchen, food service, cafe, bar, bakery — plus "grease" for plumbing), +1 for valuation over $50k; only keyword hits are stored
 
-Digest buckets: 🔥 score ≥ 4, 👀 score 2–3.
+Digest buckets: 🔥 score ≥ 4, 👀 score 2–3. Entries are labeled with their source, e.g. `[health]`.
+
+## Adding a source
+
+Sources are declarative configs in `src/sources.rs`. To add one, add a `Source` entry to the `all()` registry:
+
+```rust
+Source {
+    key: "my_source",                       // DB/watermark key and digest label
+    dataset: "abcd-1234",                   // Socrata dataset id
+    date_field: Some("filed_date"),         // or None for snapshot datasets
+    min_store_score: 0,                     // rows scoring below this are dropped at ingest
+    external_id: |r| f(r, "permit_number"), // dedupe key (composite ok)
+    name: |r| f(r, "dba_name"),
+    address: |r| f(r, "street_address"),
+    neighborhood: |r| f(r, "analysis_neighborhood"),
+    score: |r, _conn| score::score_my_source(r),
+}
+```
+
+`fetch` and `digest` pick it up automatically: incremental fetching uses the per-source watermark (90-day backfill on first run), snapshot sources (`date_field: None`) are fetched whole each run and new rows surface because they weren't in `signals` before.

@@ -4,10 +4,8 @@ use anyhow::Result;
 use chrono::{Duration, Local};
 use clap::{Parser, Subcommand};
 
-use sf_radar::{db, digest, score, socrata};
+use sf_radar::{db, digest, score, socrata, sources};
 
-const BUSINESS_DATASET: &str = "g8m3-pdis";
-const PERMIT_DATASET: &str = "i98e-djp9";
 const FULL_BACKFILL_DAYS: i64 = 90;
 
 #[derive(Parser)]
@@ -28,7 +26,7 @@ struct Cli {
 enum Command {
     /// Create the database and schema
     Init,
-    /// Pull new rows from both Socrata datasets
+    /// Pull new rows from all Socrata sources
     Fetch {
         /// Fetch rows on/after this date (YYYY-MM-DD), overriding the stored watermark
         #[arg(long, value_name = "YYYY-MM-DD")]
@@ -65,6 +63,10 @@ fn days_ago(n: i64) -> String {
         .to_string()
 }
 
+fn today() -> String {
+    Local::now().format("%Y-%m-%d").to_string()
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let db_path = cli.db.clone().unwrap_or_else(default_db_path);
@@ -92,77 +94,104 @@ fn fetch(db_path: &std::path::Path, since: Option<String>, full: bool) -> Result
         println!("Using SOCRATA_APP_TOKEN.");
     }
 
+    let today = today();
     let mut total = 0usize;
-    for source in [
-        SourceSpec {
-            name: "businesses",
-            dataset: BUSINESS_DATASET,
-            date_field: "dba_start_date",
-            id_field: "uniqueid",
-        },
-        SourceSpec {
-            name: "permits",
-            dataset: PERMIT_DATASET,
-            date_field: "filed_date",
-            id_field: "permit_number",
-        },
-    ] {
-        let watermark_key = format!("watermark:{}", source.name);
-        let effective_since = if full {
-            days_ago(FULL_BACKFILL_DAYS)
-        } else if let Some(s) = &since {
-            s.clone()
-        } else {
-            db::get_watermark(&conn, &watermark_key)?.unwrap_or_else(|| days_ago(FULL_BACKFILL_DAYS))
+    for source in sources::all() {
+        let watermark_key = format!("watermark:{}", source.key);
+
+        let (rows, effective_since) = match source.date_field {
+            Some(date_field) => {
+                let effective_since = if full {
+                    days_ago(FULL_BACKFILL_DAYS)
+                } else if let Some(s) = &since {
+                    s.clone()
+                } else {
+                    db::get_watermark(&conn, &watermark_key)?
+                        .unwrap_or_else(|| days_ago(FULL_BACKFILL_DAYS))
+                };
+                println!(
+                    "Fetching {} since {} ...",
+                    source.key,
+                    effective_since.get(..10).unwrap_or(&effective_since)
+                );
+                let rows = client.fetch_since(source.dataset, date_field, &effective_since)?;
+                (rows, Some(effective_since))
+            }
+            None => {
+                println!("Fetching {} (snapshot, full dataset) ...", source.key);
+                (client.fetch_all(source.dataset)?, None)
+            }
         };
 
-        println!(
-            "Fetching {} since {} ...",
-            source.name,
-            effective_since.get(..10).unwrap_or(&effective_since)
-        );
-        let rows = client.fetch_since(source.dataset, source.date_field, &effective_since)?;
-
-        let mut max_date = effective_since.clone();
-        let mut upserted = 0usize;
+        let mut max_date = effective_since
+            .as_deref()
+            .map(db::normalize_date)
+            .unwrap_or_default();
+        let mut stored = 0usize;
         for row in &rows {
-            if score::field(row, source.id_field).is_empty() {
+            // Advance the watermark over every fetched row, even ones we don't store.
+            if let Some(date_field) = source.date_field {
+                let d = score::field(row, date_field);
+                if !d.is_empty() {
+                    let d = db::normalize_date(d);
+                    if d > max_date {
+                        max_date = d;
+                    }
+                }
+            }
+
+            let external_id = (source.external_id)(row);
+            if external_id.trim_matches('-').is_empty() {
                 continue;
             }
-            let (sc, reasons) = match source.name {
-                "businesses" => score::score_business(row),
-                _ => score::score_permit(row),
+            let (sc, reasons) = (source.score)(row, &conn);
+            if sc < source.min_store_score {
+                continue;
+            }
+            let date = match source.date_field {
+                Some(date_field) => db::normalize_date(score::field(row, date_field)),
+                None => today.clone(), // snapshot: date = first_seen
             };
-            match source.name {
-                "businesses" => db::upsert_business(&conn, row, sc, &reasons)?,
-                _ => db::upsert_permit(&conn, row, sc, &reasons)?,
-            }
-            upserted += 1;
-
-            let d = score::field(row, source.date_field);
-            if !d.is_empty() && d > max_date.as_str() {
-                max_date = d.to_string();
-            }
+            db::upsert_signal(
+                &conn,
+                &db::Signal {
+                    source: source.key,
+                    external_id,
+                    name: (source.name)(row),
+                    address: (source.address)(row),
+                    date,
+                    neighborhood: (source.neighborhood)(row),
+                    raw: row.to_string(),
+                    score: sc,
+                    reasons,
+                    first_seen: today.clone(),
+                },
+            )?;
+            stored += 1;
         }
-        db::set_watermark(&conn, &watermark_key, &max_date)?;
-        println!("  {upserted} {} upserted (watermark -> {max_date})", source.name);
-        total += upserted;
+
+        if effective_since.is_some() {
+            // Bad source data can carry future dates; never let a watermark
+            // move past today or incremental fetches would skip everything.
+            if max_date > today {
+                max_date.clone_from(&today);
+            }
+            db::set_watermark(&conn, &watermark_key, &max_date)?;
+        }
+        println!(
+            "  {} rows fetched, {stored} stored",
+            rows.len(),
+        );
+        total += stored;
     }
 
-    println!("\nDone — {total} rows upserted into {}", db_path.display());
+    println!("\nDone — {total} signals stored in {}", db_path.display());
     println!("\nTip: keep the radar warm with cron (`crontab -e`):");
     let exe = std::env::current_exe()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "sf-radar".to_string());
     println!("  0 */6 * * * {exe} fetch --db {} >> /tmp/sf-radar.log 2>&1", db_path.display());
     Ok(())
-}
-
-struct SourceSpec {
-    name: &'static str,
-    dataset: &'static str,
-    date_field: &'static str,
-    id_field: &'static str,
 }
 
 fn digest_cmd(
@@ -177,22 +206,10 @@ fn digest_cmd(
         .format("%Y-%m-%d")
         .to_string();
 
-    let mut entries = db::unseen_businesses(&conn, &cutoff, min_score, neighborhood)?;
-    entries.extend(db::unseen_permits(&conn, &cutoff, min_score, neighborhood)?);
+    let entries = db::unseen_signals(&conn, &cutoff, &today(), min_score, neighborhood)?;
 
     print!("{}", digest::render(&entries, min_score, md, days));
 
-    let business_ids: Vec<String> = entries
-        .iter()
-        .filter(|e| e.source == "business")
-        .map(|e| e.id.clone())
-        .collect();
-    let permit_ids: Vec<String> = entries
-        .iter()
-        .filter(|e| e.source == "permit")
-        .map(|e| e.id.clone())
-        .collect();
-    db::mark_seen(&conn, "businesses", "uniqueid", &business_ids)?;
-    db::mark_seen(&conn, "permits", "permit_number", &permit_ids)?;
+    db::mark_seen(&conn, &entries)?;
     Ok(())
 }

@@ -1,52 +1,53 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::Result;
 use rusqlite::{params, Connection};
-use serde_json::Value;
 
 use crate::digest::DigestEntry;
-use crate::score::field;
 
-/// Open (creating if needed) the database and ensure the schema exists.
+/// One scored row on its way into the `signals` table.
+pub struct Signal {
+    pub source: &'static str,
+    pub external_id: String,
+    pub name: String,
+    pub address: String,
+    pub date: String, // YYYY-MM-DD
+    pub neighborhood: String,
+    pub raw: String, // raw JSON row
+    pub score: u32,
+    pub reasons: Vec<String>,
+    pub first_seen: String, // YYYY-MM-DD, set by us on first insert
+}
+
+/// Open (creating if needed) the database, ensure the schema exists,
+/// and migrate any legacy per-source tables.
 pub fn open(path: &Path) -> Result<Connection> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let conn = Connection::open(path)?;
     init_schema(&conn)?;
+    migrate_legacy(&conn)?;
     Ok(conn)
 }
 
 pub fn init_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "
-        CREATE TABLE IF NOT EXISTS businesses (
-            uniqueid              TEXT PRIMARY KEY,
-            dba_name              TEXT NOT NULL DEFAULT '',
-            ownership_name        TEXT NOT NULL DEFAULT '',
-            dba_start_date        TEXT NOT NULL DEFAULT '',
-            location_start_date   TEXT NOT NULL DEFAULT '',
-            lic_code_description  TEXT NOT NULL DEFAULT '',
-            naics                 TEXT NOT NULL DEFAULT '',
-            neighborhood          TEXT NOT NULL DEFAULT '',
-            address               TEXT NOT NULL DEFAULT '',
-            corridor              TEXT NOT NULL DEFAULT '',
-            score                 INTEGER NOT NULL DEFAULT 0,
-            reasons               TEXT NOT NULL DEFAULT '',
-            seen                  INTEGER NOT NULL DEFAULT 0
-        );
-        CREATE TABLE IF NOT EXISTS permits (
-            permit_number   TEXT PRIMARY KEY,
-            description     TEXT NOT NULL DEFAULT '',
-            filed_date      TEXT NOT NULL DEFAULT '',
-            issued_date     TEXT NOT NULL DEFAULT '',
-            proposed_use    TEXT NOT NULL DEFAULT '',
-            estimated_cost  TEXT NOT NULL DEFAULT '',
-            neighborhood    TEXT NOT NULL DEFAULT '',
-            address         TEXT NOT NULL DEFAULT '',
-            score           INTEGER NOT NULL DEFAULT 0,
-            reasons         TEXT NOT NULL DEFAULT '',
-            seen            INTEGER NOT NULL DEFAULT 0
+        CREATE TABLE IF NOT EXISTS signals (
+            source        TEXT NOT NULL,
+            external_id   TEXT NOT NULL,
+            name          TEXT NOT NULL DEFAULT '',
+            address       TEXT NOT NULL DEFAULT '',
+            date          TEXT NOT NULL DEFAULT '',
+            neighborhood  TEXT NOT NULL DEFAULT '',
+            raw           TEXT NOT NULL DEFAULT '',
+            score         INTEGER NOT NULL DEFAULT 0,
+            reasons       TEXT NOT NULL DEFAULT '',
+            first_seen    TEXT NOT NULL DEFAULT '',
+            seen          INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (source, external_id)
         );
         CREATE TABLE IF NOT EXISTS meta (
             key   TEXT PRIMARY KEY,
@@ -57,9 +58,64 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn table_exists(conn: &Connection, name: &str) -> Result<bool> {
+    let mut stmt = conn.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1")?;
+    Ok(stmt.exists(params![name])?)
+}
+
+/// One-time migration from the legacy `businesses`/`permits` tables into
+/// `signals` (preserving score/reasons/seen; first_seen = date), then drops
+/// the old tables and renames their watermark keys to the new source keys.
+pub fn migrate_legacy(conn: &Connection) -> Result<()> {
+    if table_exists(conn, "businesses")? {
+        conn.execute_batch(
+            "
+            INSERT OR IGNORE INTO signals
+                (source, external_id, name, address, date, neighborhood, raw,
+                 score, reasons, first_seen, seen)
+            SELECT 'business', uniqueid,
+                   CASE WHEN dba_name = '' THEN ownership_name ELSE dba_name END,
+                   address, dba_start_date, neighborhood, '',
+                   score, reasons, dba_start_date, seen
+            FROM businesses;
+            DROP TABLE businesses;
+            UPDATE meta SET key = 'watermark:business' WHERE key = 'watermark:businesses';
+            ",
+        )?;
+    }
+    if table_exists(conn, "permits")? {
+        conn.execute_batch(
+            "
+            INSERT OR IGNORE INTO signals
+                (source, external_id, name, address, date, neighborhood, raw,
+                 score, reasons, first_seen, seen)
+            SELECT 'permit', permit_number, 'Permit ' || permit_number,
+                   address, filed_date, neighborhood, '',
+                   score, reasons, filed_date, seen
+            FROM permits;
+            DROP TABLE permits;
+            UPDATE meta SET key = 'watermark:permit' WHERE key = 'watermark:permits';
+            ",
+        )?;
+    }
+    Ok(())
+}
+
 /// First 10 chars of an ISO timestamp -> YYYY-MM-DD, so string compares work.
-fn date_only(s: &str) -> &str {
+pub fn date_only(s: &str) -> &str {
     s.get(..10).unwrap_or(s)
+}
+
+/// Normalize a Socrata date/timestamp to YYYY-MM-DD. Handles ISO timestamps
+/// ("2026-07-31T00:00:00.000") and compact dates ("20260731", used by some
+/// datasets like mobile food's `received`).
+pub fn normalize_date(s: &str) -> String {
+    let s = s.trim();
+    if s.len() == 8 && s.bytes().all(|b| b.is_ascii_digit()) {
+        format!("{}-{}-{}", &s[..4], &s[4..6], &s[6..8])
+    } else {
+        date_only(s).to_string()
+    }
 }
 
 fn join_reasons(reasons: &[String]) -> String {
@@ -74,88 +130,48 @@ fn split_reasons(s: &str) -> Vec<String> {
     }
 }
 
-pub fn upsert_business(conn: &Connection, row: &Value, score: u32, reasons: &[String]) -> Result<()> {
+/// Insert a signal, or refresh it on conflict. `date`, `first_seen`, and
+/// `seen` are set on first insert only — re-fetches never move a signal's
+/// date forward (matters for snapshot sources) or un-see it.
+pub fn upsert_signal(conn: &Connection, s: &Signal) -> Result<()> {
     conn.execute(
-        "INSERT INTO businesses (uniqueid, dba_name, ownership_name, dba_start_date,
-                                 location_start_date, lic_code_description, naics,
-                                 neighborhood, address, corridor, score, reasons)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
-         ON CONFLICT(uniqueid) DO UPDATE SET
-            dba_name = excluded.dba_name,
-            ownership_name = excluded.ownership_name,
-            dba_start_date = excluded.dba_start_date,
-            location_start_date = excluded.location_start_date,
-            lic_code_description = excluded.lic_code_description,
-            naics = excluded.naics,
-            neighborhood = excluded.neighborhood,
+        "INSERT INTO signals (source, external_id, name, address, date, neighborhood,
+                              raw, score, reasons, first_seen, seen)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0)
+         ON CONFLICT(source, external_id) DO UPDATE SET
+            name = excluded.name,
             address = excluded.address,
-            corridor = excluded.corridor,
+            neighborhood = excluded.neighborhood,
+            raw = excluded.raw,
             score = excluded.score,
             reasons = excluded.reasons",
         params![
-            field(row, "uniqueid"),
-            field(row, "dba_name"),
-            field(row, "ownership_name"),
-            date_only(field(row, "dba_start_date")),
-            date_only(field(row, "location_start_date")),
-            field(row, "lic_code_description"),
-            field(row, "self_reported_naics_code"),
-            field(row, "neighborhoods_analysis_boundaries"),
-            field(row, "full_business_address"),
-            field(row, "business_corridor"),
-            score,
-            join_reasons(reasons),
+            s.source,
+            s.external_id,
+            s.name,
+            s.address,
+            s.date,
+            s.neighborhood,
+            s.raw,
+            s.score,
+            join_reasons(&s.reasons),
+            s.first_seen,
         ],
     )?;
     Ok(())
 }
 
-pub fn upsert_permit(conn: &Connection, row: &Value, score: u32, reasons: &[String]) -> Result<()> {
-    let address = permit_address(row);
-    conn.execute(
-        "INSERT INTO permits (permit_number, description, filed_date, issued_date,
-                              proposed_use, estimated_cost, neighborhood, address,
-                              score, reasons)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-         ON CONFLICT(permit_number) DO UPDATE SET
-            description = excluded.description,
-            filed_date = excluded.filed_date,
-            issued_date = excluded.issued_date,
-            proposed_use = excluded.proposed_use,
-            estimated_cost = excluded.estimated_cost,
-            neighborhood = excluded.neighborhood,
-            address = excluded.address,
-            score = excluded.score,
-            reasons = excluded.reasons",
-        params![
-            field(row, "permit_number"),
-            field(row, "description"),
-            date_only(field(row, "filed_date")),
-            date_only(field(row, "issued_date")),
-            field(row, "proposed_use"),
-            field(row, "estimated_cost"),
-            field(row, "neighborhoods_analysis_boundaries"),
-            address,
-            score,
-            join_reasons(reasons),
-        ],
+/// Does `source` already have a signal whose external_id starts with
+/// `id_prefix`? Used by the health source to detect first inspections.
+pub fn has_signal_with_id_prefix(conn: &Connection, source: &str, id_prefix: &str) -> Result<bool> {
+    let escaped = id_prefix
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    let mut stmt = conn.prepare(
+        "SELECT 1 FROM signals WHERE source = ?1 AND external_id LIKE ?2 ESCAPE '\\' LIMIT 1",
     )?;
-    Ok(())
-}
-
-fn permit_address(row: &Value) -> String {
-    let mut parts: Vec<&str> = vec![
-        field(row, "street_number"),
-        field(row, "street_name"),
-        field(row, "street_suffix"),
-    ];
-    parts.retain(|p| !p.is_empty());
-    let mut addr = parts.join(" ");
-    let unit = field(row, "unit");
-    if !unit.is_empty() {
-        addr.push_str(&format!(", unit {unit}"));
-    }
-    addr
+    Ok(stmt.exists(params![source, format!("{escaped}%")])?)
 }
 
 pub fn get_watermark(conn: &Connection, key: &str) -> Result<Option<String>> {
@@ -181,76 +197,51 @@ fn neighborhood_pattern(neighborhood: Option<&str>) -> String {
         .unwrap_or_else(|| "%".to_string())
 }
 
-pub fn unseen_businesses(
+pub fn unseen_signals(
     conn: &Connection,
     cutoff: &str,
+    max_date: &str,
     min_score: u32,
     neighborhood: Option<&str>,
 ) -> Result<Vec<DigestEntry>> {
     let mut stmt = conn.prepare(
-        "SELECT uniqueid, dba_name, ownership_name, address, dba_start_date,
-                neighborhood, score, reasons
-         FROM businesses
-         WHERE seen = 0 AND score >= ?1 AND dba_start_date >= ?2
-           AND neighborhood LIKE ?3
-         ORDER BY dba_start_date DESC",
+        "SELECT source, external_id, name, address, date, neighborhood, score, reasons
+         FROM signals
+         WHERE seen = 0 AND score >= ?1 AND date >= ?2 AND date <= ?3
+           AND neighborhood LIKE ?4
+         ORDER BY date DESC",
     )?;
-    let rows = stmt.query_map(params![min_score, cutoff, neighborhood_pattern(neighborhood)], |r| {
-        let dba: String = r.get(1)?;
-        let ownership: String = r.get(2)?;
-        Ok(DigestEntry {
-            source: "business",
-            id: r.get(0)?,
-            name: if dba.is_empty() { ownership } else { dba },
-            address: r.get(3)?,
-            date: r.get(4)?,
-            neighborhood: r.get(5)?,
-            score: r.get(6)?,
-            reasons: split_reasons(&r.get::<_, String>(7)?),
-        })
-    })?;
+    let rows = stmt.query_map(
+        params![min_score, cutoff, max_date, neighborhood_pattern(neighborhood)],
+        |r| {
+            Ok(DigestEntry {
+                source: r.get(0)?,
+                id: r.get(1)?,
+                name: r.get(2)?,
+                address: r.get(3)?,
+                date: r.get(4)?,
+                neighborhood: r.get(5)?,
+                score: r.get(6)?,
+                reasons: split_reasons(&r.get::<_, String>(7)?),
+            })
+        },
+    )?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-pub fn unseen_permits(
-    conn: &Connection,
-    cutoff: &str,
-    min_score: u32,
-    neighborhood: Option<&str>,
-) -> Result<Vec<DigestEntry>> {
-    let mut stmt = conn.prepare(
-        "SELECT permit_number, address, filed_date, neighborhood, score, reasons
-         FROM permits
-         WHERE seen = 0 AND score >= ?1 AND filed_date >= ?2
-           AND neighborhood LIKE ?3
-         ORDER BY filed_date DESC",
-    )?;
-    let rows = stmt.query_map(params![min_score, cutoff, neighborhood_pattern(neighborhood)], |r| {
-        let permit_number: String = r.get(0)?;
-        Ok(DigestEntry {
-            source: "permit",
-            name: format!("Permit {permit_number}"),
-            id: permit_number,
-            address: r.get(1)?,
-            date: r.get(2)?,
-            neighborhood: r.get(3)?,
-            score: r.get(4)?,
-            reasons: split_reasons(&r.get::<_, String>(5)?),
-        })
-    })?;
-    Ok(rows.collect::<rusqlite::Result<_>>()?)
-}
-
-/// Mark rows as seen so future digests don't resurface them.
-/// `table` is an internal constant ("businesses" or "permits").
-pub fn mark_seen(conn: &Connection, table: &str, id_column: &str, ids: &[String]) -> Result<()> {
-    if ids.is_empty() {
-        return Ok(());
+/// Mark digest entries as seen so future digests don't resurface them.
+pub fn mark_seen(conn: &Connection, entries: &[DigestEntry]) -> Result<()> {
+    let mut by_source: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for e in entries {
+        by_source.entry(&e.source).or_default().push(&e.id);
     }
-    let placeholders = vec!["?"; ids.len()].join(", ");
-    let sql = format!("UPDATE {table} SET seen = 1 WHERE {id_column} IN ({placeholders})");
-    let params: Vec<&dyn rusqlite::ToSql> =
-        ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
-    conn.execute(&sql, params.as_slice())?;
+    for (source, ids) in by_source {
+        let placeholders = vec!["?"; ids.len()].join(", ");
+        let sql =
+            format!("UPDATE signals SET seen = 1 WHERE source = ? AND external_id IN ({placeholders})");
+        let mut query_params: Vec<&dyn rusqlite::ToSql> = vec![&source];
+        query_params.extend(ids.iter().map(|id| id as &dyn rusqlite::ToSql));
+        conn.execute(&sql, query_params.as_slice())?;
+    }
     Ok(())
 }

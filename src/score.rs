@@ -111,3 +111,82 @@ pub fn score_permit(row: &Value) -> (u32, Vec<String>) {
 
     (score, reasons)
 }
+
+/// Score a Places of Entertainment row (snapshot dataset — every row is a venue).
+pub fn score_entertainment(row: &Value) -> (u32, Vec<String>) {
+    let mut score = 2;
+    let mut reasons = vec!["new entertainment venue".to_string()];
+    let license_type = field(row, "license_type");
+    if !license_type.is_empty() {
+        score += 1;
+        reasons.push(format!("license type: {license_type}"));
+    }
+    (score, reasons)
+}
+
+/// Score a Mobile Food Facility permit row.
+pub fn score_mobile_food(row: &Value) -> (u32, Vec<String>) {
+    let mut score = 2;
+    let mut reasons = vec!["new mobile food permit".to_string()];
+    if field(row, "facilitytype").eq_ignore_ascii_case("truck") {
+        score += 1;
+        reasons.push("food truck".to_string());
+    }
+    (score, reasons)
+}
+
+/// Keywords in trade-permit descriptions that signal a food/retail buildout.
+const TRADE_KEYWORDS: &[&str] = &[
+    "restaurant",
+    "kitchen",
+    "food service",
+    "cafe",
+    "bar",
+    "bakery",
+];
+
+/// Same, plus "grease" — a grease trap/interceptor is a restaurant buildout tell.
+const PLUMBING_KEYWORDS: &[&str] = &[
+    "restaurant",
+    "kitchen",
+    "food service",
+    "cafe",
+    "bar",
+    "bakery",
+    "grease",
+];
+
+fn score_trade_permit(row: &Value, keywords: &[&str], cost_field: &str) -> (u32, Vec<String>) {
+    let mut score = 0;
+    let mut reasons = Vec::new();
+
+    let desc = field(row, "description").to_lowercase();
+    let hits: Vec<&str> = keywords
+        .iter()
+        .copied()
+        .filter(|k| desc.contains(k))
+        .collect();
+    if !hits.is_empty() {
+        score += 2;
+        reasons.push(format!("keyword: {}", hits.join(", ")));
+    }
+
+    if let Some(valuation) = field_num(row, cost_field)
+        && valuation > 50_000.0
+    {
+        score += 1;
+        reasons.push(format!("valuation ${valuation:.0}"));
+    }
+
+    (score, reasons)
+}
+
+/// Score an Electrical Permit row.
+pub fn score_electrical(row: &Value) -> (u32, Vec<String>) {
+    score_trade_permit(row, TRADE_KEYWORDS, "permit_valuation")
+}
+
+/// Score a Plumbing Permit row.
+pub fn score_plumbing(row: &Value) -> (u32, Vec<String>) {
+    score_trade_permit(row, PLUMBING_KEYWORDS, "valuation")
+}

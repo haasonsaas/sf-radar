@@ -36,17 +36,38 @@ impl SocrataClient {
     /// Fetch every row of `dataset` with `date_field >= since` (ISO date/timestamp),
     /// paging with LIMIT/OFFSET until a short page.
     pub fn fetch_since(&self, dataset: &str, date_field: &str, since: &str) -> Result<Vec<Value>> {
+        self.fetch_pages(
+            dataset,
+            Some(format!("{date_field} >= '{since}'")),
+            date_field,
+        )
+    }
+
+    /// Fetch the entire dataset (for snapshot sources without a date field),
+    /// paging on the system row id for stability.
+    pub fn fetch_all(&self, dataset: &str) -> Result<Vec<Value>> {
+        self.fetch_pages(dataset, None, ":id")
+    }
+
+    fn fetch_pages(
+        &self,
+        dataset: &str,
+        where_clause: Option<String>,
+        order: &str,
+    ) -> Result<Vec<Value>> {
         let url = format!("https://data.sfgov.org/resource/{dataset}.json");
         let mut all = Vec::new();
         let mut offset = 0usize;
 
         loop {
-            let query = [
-                ("$where", format!("{date_field} >= '{since}'")),
-                ("$order", date_field.to_string()),
+            let mut query = vec![
+                ("$order", order.to_string()),
                 ("$limit", PAGE_SIZE.to_string()),
                 ("$offset", offset.to_string()),
             ];
+            if let Some(w) = &where_clause {
+                query.push(("$where", w.clone()));
+            }
             let mut req = self.client.get(&url).query(&query);
             if let Some(token) = &self.app_token {
                 req = req.header("X-App-Token", token);
