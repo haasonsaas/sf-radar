@@ -218,15 +218,21 @@ fn digest_cmd(
 
     let entries = {
         let mut entries = db::unseen_signals(&conn, &cutoff, &today(), min_score, neighborhood)?;
-        // Display-time corroboration: +2 when other sources have filings at
-        // the same address. Not written back to the DB.
-        let index = digest::AddressIndex::build(db::all_addresses(&conn)?);
-        digest::apply_corroboration(&mut entries, &index);
+        // Display-time corroboration: +2 for other sources at the same
+        // address, +1 for other sources under the same name. Not persisted.
+        let rows = db::all_addresses(&conn)?;
+        let names = digest::NameIndex::build(&rows);
+        let addresses = digest::AddressIndex::build(rows);
+        digest::apply_corroboration(&mut entries, &addresses, &names);
         entries
     };
 
     print!("{}", digest::render(&entries, min_score, md, days));
 
     db::mark_seen(&conn, &entries)?;
+    let archived = db::archive_before(&conn, &cutoff)?;
+    if archived > 0 {
+        println!("(archived {archived} signals older than the window)");
+    }
     Ok(())
 }

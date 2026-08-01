@@ -207,7 +207,7 @@ pub fn unseen_signals(
     neighborhood: Option<&str>,
 ) -> Result<Vec<DigestEntry>> {
     let mut stmt = conn.prepare(
-        "SELECT source, external_id, name, address, date, neighborhood, score, reasons
+        "SELECT source, external_id, name, address, date, neighborhood, score, reasons, raw
          FROM signals
          WHERE seen = 0 AND score >= ?1 AND date >= ?2 AND date <= ?3
            AND neighborhood LIKE ?4
@@ -216,7 +216,10 @@ pub fn unseen_signals(
     let rows = stmt.query_map(
         params![min_score, cutoff, max_date, neighborhood_pattern(neighborhood)],
         |r| {
+            let source: String = r.get(0)?;
+            let raw: String = r.get(8)?;
             Ok(DigestEntry {
+                description: crate::digest::description_snippet(&source, &raw),
                 source: r.get(0)?,
                 id: r.get(1)?,
                 name: r.get(2)?,
@@ -229,6 +232,17 @@ pub fn unseen_signals(
         },
     )?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Mark seen every unseen row with a date older than `cutoff` (any score,
+/// any source) — they predate the digest window and would never be shown by
+/// default. Rows with an empty date are left alone. Returns the count.
+pub fn archive_before(conn: &Connection, cutoff: &str) -> Result<usize> {
+    let n = conn.execute(
+        "UPDATE signals SET seen = 1 WHERE seen = 0 AND date != '' AND date < ?1",
+        params![cutoff],
+    )?;
+    Ok(n)
 }
 
 /// (source, name, address, date) for every signal with an address — the

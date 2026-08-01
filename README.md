@@ -57,9 +57,9 @@ Data is stored in `~/.local/share/sf-radar/radar.db` (override with `--db`). If 
 - **Mobile food**: +2 base, +1 for trucks
 - **Electrical / plumbing permits**: +2 for strong buildout keywords (restaurant, food service, cafe, cafeteria, bakery, commercial kitchen — plus "grease" for plumbing, and "bar" as a standalone word excluding wet/grab/towel bar), +1 for "kitchen" alone, +1 for valuation over $50k; only rows scoring ≥ 2 are stored
 
-**Corroboration**: at digest time, an entry gets +2 when other sources have filings at the same address (addresses are normalized across formats — case, whitespace, ST/STREET, 1ST/FIRST, unit designators stripped). Corroboration matches against full DB history including already-seen rows, and the bonus is display-only — the stored score is untouched.
+**Corroboration**: at digest time, an entry gets +2 when other sources have filings at the same address (addresses are normalized across formats — case, whitespace, ST/STREET, 1ST/FIRST, unit designators stripped), and +1 when other sources have filings under the same name (names normalized — case, punctuation, entity suffixes like LLC/INC dropped; minimum length 4). Name matches catch pairs whose addresses don't normalize equal, like a food truck's commissary vs its storefront. Corroboration matches against full DB history including already-seen rows, and the bonuses are display-only — stored scores are untouched.
 
-Digest buckets: 🔥 score ≥ 4, 👀 score 2–3. Entries are labeled with their source, e.g. `[health]`.
+Digest buckets: 🔥 score ≥ 4, 👀 score 2–3. Entries are labeled with their source, e.g. `[health]`. Permit-type entries show a one-line snippet of the actual permit description (from the stored raw row, truncated to ~120 chars). Within a bucket, neighborhoods and entries are ordered by score then date, so the strongest signals come first. After printing, the digest also archives (marks seen) every unseen row older than the lookback window and reports the count — stale backfill rows don't linger forever.
 
 ## Adding a source
 
