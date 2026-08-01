@@ -45,6 +45,9 @@ enum Command {
         /// Minimum score to include
         #[arg(long, default_value_t = 2)]
         min_score: u32,
+        /// Only include rows whose neighborhood contains this text (case-insensitive)
+        #[arg(long, value_name = "NAME")]
+        neighborhood: Option<String>,
         /// Emit markdown instead of plain text
         #[arg(long)]
         md: bool,
@@ -75,8 +78,9 @@ fn main() -> Result<()> {
         Command::Digest {
             days,
             min_score,
+            neighborhood,
             md,
-        } => digest_cmd(&db_path, days, min_score, md)?,
+        } => digest_cmd(&db_path, days, min_score, neighborhood.as_deref(), md)?,
     }
     Ok(())
 }
@@ -161,14 +165,20 @@ struct SourceSpec {
     id_field: &'static str,
 }
 
-fn digest_cmd(db_path: &std::path::Path, days: u32, min_score: u32, md: bool) -> Result<()> {
+fn digest_cmd(
+    db_path: &std::path::Path,
+    days: u32,
+    min_score: u32,
+    neighborhood: Option<&str>,
+    md: bool,
+) -> Result<()> {
     let conn = db::open(db_path)?;
     let cutoff = (Local::now() - Duration::days(days as i64))
         .format("%Y-%m-%d")
         .to_string();
 
-    let mut entries = db::unseen_businesses(&conn, &cutoff, min_score)?;
-    entries.extend(db::unseen_permits(&conn, &cutoff, min_score)?);
+    let mut entries = db::unseen_businesses(&conn, &cutoff, min_score, neighborhood)?;
+    entries.extend(db::unseen_permits(&conn, &cutoff, min_score, neighborhood)?);
 
     print!("{}", digest::render(&entries, min_score, md, days));
 

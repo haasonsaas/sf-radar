@@ -173,15 +173,29 @@ pub fn set_watermark(conn: &Connection, key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn unseen_businesses(conn: &Connection, cutoff: &str, min_score: u32) -> Result<Vec<DigestEntry>> {
+/// LIKE pattern for a neighborhood substring filter; "%" matches everything,
+/// including rows with an empty neighborhood.
+fn neighborhood_pattern(neighborhood: Option<&str>) -> String {
+    neighborhood
+        .map(|n| format!("%{n}%"))
+        .unwrap_or_else(|| "%".to_string())
+}
+
+pub fn unseen_businesses(
+    conn: &Connection,
+    cutoff: &str,
+    min_score: u32,
+    neighborhood: Option<&str>,
+) -> Result<Vec<DigestEntry>> {
     let mut stmt = conn.prepare(
         "SELECT uniqueid, dba_name, ownership_name, address, dba_start_date,
                 neighborhood, score, reasons
          FROM businesses
          WHERE seen = 0 AND score >= ?1 AND dba_start_date >= ?2
+           AND neighborhood LIKE ?3
          ORDER BY dba_start_date DESC",
     )?;
-    let rows = stmt.query_map(params![min_score, cutoff], |r| {
+    let rows = stmt.query_map(params![min_score, cutoff, neighborhood_pattern(neighborhood)], |r| {
         let dba: String = r.get(1)?;
         let ownership: String = r.get(2)?;
         Ok(DigestEntry {
@@ -198,14 +212,20 @@ pub fn unseen_businesses(conn: &Connection, cutoff: &str, min_score: u32) -> Res
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-pub fn unseen_permits(conn: &Connection, cutoff: &str, min_score: u32) -> Result<Vec<DigestEntry>> {
+pub fn unseen_permits(
+    conn: &Connection,
+    cutoff: &str,
+    min_score: u32,
+    neighborhood: Option<&str>,
+) -> Result<Vec<DigestEntry>> {
     let mut stmt = conn.prepare(
         "SELECT permit_number, address, filed_date, neighborhood, score, reasons
          FROM permits
          WHERE seen = 0 AND score >= ?1 AND filed_date >= ?2
+           AND neighborhood LIKE ?3
          ORDER BY filed_date DESC",
     )?;
-    let rows = stmt.query_map(params![min_score, cutoff], |r| {
+    let rows = stmt.query_map(params![min_score, cutoff, neighborhood_pattern(neighborhood)], |r| {
         let permit_number: String = r.get(0)?;
         Ok(DigestEntry {
             source: "permit",

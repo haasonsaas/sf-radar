@@ -20,6 +20,9 @@ cargo run -- digest --days 30
 
 # Markdown output, higher signal threshold
 cargo run -- digest --days 7 --min-score 3 --md
+
+# Only one neighborhood (case-insensitive substring match)
+cargo run -- digest --days 30 --neighborhood "Mission Bay"
 ```
 
 Weekly cron example:
@@ -35,7 +38,7 @@ Data is stored in `~/.local/share/sf-radar/radar.db` (override with `--db`). If 
 | Command | What it does |
 | --- | --- |
 | `sf-radar fetch [--full] [--since DATE]` | Incrementally pull new filings; `--full` backfills 90 days |
-| `sf-radar digest [--days N] [--min-score N] [--md]` | Score unseen rows and print the digest |
+| `sf-radar digest [--days N] [--min-score N] [--neighborhood NAME] [--md]` | Score unseen rows and print the digest |
 | `sf-radar init` | Create the database (auto-run by other commands) |
 
 ## How scoring works
