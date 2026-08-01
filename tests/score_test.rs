@@ -141,6 +141,7 @@ fn entry(name: &str, hood: &str, date: &str, score: u32) -> DigestEntry {
         neighborhood: hood.to_string(),
         score,
         reasons: vec!["test reason".to_string()],
+        description: None,
     }
 }
 
@@ -266,4 +267,60 @@ fn trade_bar_excludes_residential_compounds() {
 
     let row = json!({"description": "bar and restaurant light remodel", "valuation": ""});
     assert_eq!(score_plumbing(&row).0, 2);
+}
+
+use sf_radar::digest::description_snippet;
+
+#[test]
+fn description_snippet_extraction_and_truncation() {
+    // Only permit-type sources.
+    assert_eq!(description_snippet("business", r#"{"description":"x"}"#), None);
+    assert_eq!(description_snippet("permit", ""), None);
+    assert_eq!(description_snippet("permit", "not json"), None);
+    assert_eq!(description_snippet("permit", r#"{"description":"  "}"#), None);
+
+    let raw = r#"{"description":"Tenant  improvement\n for   new cafe"}"#;
+    assert_eq!(
+        description_snippet("electrical", raw).as_deref(),
+        Some("Tenant improvement for new cafe")
+    );
+
+    let long = "a".repeat(200);
+    let raw = format!(r#"{{"description":"{long}"}}"#);
+    let snippet = description_snippet("plumbing", &raw).unwrap();
+    assert_eq!(snippet.chars().count(), 120);
+    assert!(snippet.ends_with("..."));
+
+    let exact = "b".repeat(120);
+    let raw = format!(r#"{{"description":"{exact}"}}"#);
+    assert_eq!(description_snippet("permit", &raw).as_deref(), Some(exact.as_str()));
+}
+
+#[test]
+fn digest_orders_groups_and_entries_by_score() {
+    let mut entries = vec![
+        entry("alpha-low", "Alamo", "2026-07-01", 4),
+        entry("zulu-high", "Zoo Heights", "2026-07-02", 5),
+        entry("alpha-high", "Alamo", "2026-06-30", 6),
+    ];
+    entries[0].source = "permit".into();
+    entries[1].source = "permit".into();
+    entries[2].source = "permit".into();
+
+    let text = render(&entries, 2, false, 7);
+    let strong = &text[text.find("🔥 Strong signals").unwrap()..];
+    // Alamo's best entry (score 6) beats Zoo Heights (score 5) despite the alphabet.
+    assert!(strong.find("Alamo").unwrap() < strong.find("Zoo Heights").unwrap());
+    // Within Alamo: score 6 before score 4.
+    assert!(strong.find("alpha-high").unwrap() < strong.find("alpha-low").unwrap());
+}
+
+#[test]
+fn digest_renders_description_lines() {
+    let mut e = entry("with-desc", "Mission", "2026-07-01", 4);
+    e.description = Some("Tenant improvement for new cafe".to_string());
+    let plain = render(&[e.clone()], 2, false, 7);
+    assert!(plain.contains("\n    Tenant improvement for new cafe\n"));
+    let md = render(&[e], 2, true, 7);
+    assert!(md.contains("\n  - *Tenant improvement for new cafe*\n"));
 }

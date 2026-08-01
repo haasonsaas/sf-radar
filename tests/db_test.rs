@@ -288,3 +288,66 @@ fn quiet_backfill_rows_stored_seen_incremental_unseen() {
     db::upsert_signal(&conn, &refetch).unwrap();
     assert_eq!(seen_of("P1-2024-03-01T00:00:00.000"), 1);
 }
+
+#[test]
+fn archive_before_marks_only_stale_dated_rows() {
+    let conn = test_conn();
+    let mut old = signal("permit", "old", "Mission");
+    old.date = "2026-01-01".to_string();
+    let mut in_window = signal("permit", "recent", "Mission");
+    in_window.date = "2026-07-20".to_string();
+    let mut no_date = signal("permit", "nodate", "Mission");
+    no_date.date = String::new();
+    let mut low_score = signal("business", "lowscore", "Mission");
+    low_score.date = "2025-12-01".to_string();
+    low_score.score = 0; // any score gets archived
+    for s in [&old, &in_window, &no_date, &low_score] {
+        db::upsert_signal(&conn, s).unwrap();
+    }
+    // One already-seen stale row is not re-counted.
+    let mut seen_old = signal("permit", "seenold", "Mission");
+    seen_old.date = "2026-01-01".to_string();
+    seen_old.seen = true;
+    db::upsert_signal(&conn, &seen_old).unwrap();
+
+    let archived = db::archive_before(&conn, "2026-07-02").unwrap();
+    assert_eq!(archived, 2, "old + lowscore archived, not seenold");
+
+    let seen_of = |id: &str| -> u32 {
+        conn.query_row(
+            "SELECT seen FROM signals WHERE external_id=?1",
+            [id],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(seen_of("old"), 1);
+    assert_eq!(seen_of("lowscore"), 1);
+    assert_eq!(seen_of("recent"), 0, "in-window rows stay unseen");
+    assert_eq!(seen_of("nodate"), 0, "empty-date rows are not touched");
+    assert_eq!(db::archive_before(&conn, "2026-07-02").unwrap(), 0);
+}
+
+#[test]
+fn unseen_signals_extracts_description_snippet() {
+    let conn = test_conn();
+    let mut s = signal("permit", "P1", "Mission");
+    s.raw = r#"{"permit_number":"P1","description":"Tenant  improvement\nfor new cafe"}"#.to_string();
+    db::upsert_signal(&conn, &s).unwrap();
+
+    let hits = db::unseen_signals(&conn, "2026-01-01", "2026-12-31", 2, None).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(
+        hits[0].description.as_deref(),
+        Some("Tenant improvement for new cafe"),
+        "whitespace collapsed"
+    );
+
+    // Non-permit sources get no snippet.
+    let mut b = signal("business", "B1", "Mission");
+    b.raw = r#"{"description":"ignored"}"#.to_string();
+    db::upsert_signal(&conn, &b).unwrap();
+    let hits = db::unseen_signals(&conn, "2026-01-01", "2026-12-31", 2, None).unwrap();
+    let biz = hits.iter().find(|e| e.source == "business").unwrap();
+    assert_eq!(biz.description, None);
+}
