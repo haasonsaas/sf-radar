@@ -18,6 +18,7 @@ pub struct Signal {
     pub score: u32,
     pub reasons: Vec<String>,
     pub first_seen: String, // YYYY-MM-DD, set by us on first insert
+    pub seen: bool,         // quiet-backfilled rows are stored pre-seen
 }
 
 /// Open (creating if needed) the database, ensure the schema exists,
@@ -137,7 +138,7 @@ pub fn upsert_signal(conn: &Connection, s: &Signal) -> Result<()> {
     conn.execute(
         "INSERT INTO signals (source, external_id, name, address, date, neighborhood,
                               raw, score, reasons, first_seen, seen)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
          ON CONFLICT(source, external_id) DO UPDATE SET
             name = excluded.name,
             address = excluded.address,
@@ -156,6 +157,7 @@ pub fn upsert_signal(conn: &Connection, s: &Signal) -> Result<()> {
             s.score,
             join_reasons(&s.reasons),
             s.first_seen,
+            s.seen,
         ],
     )?;
     Ok(())
@@ -226,6 +228,17 @@ pub fn unseen_signals(
             })
         },
     )?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// (source, name, address, date) for every signal with an address — the
+/// corroboration index matches against full DB history, seen rows included.
+pub fn all_addresses(conn: &Connection) -> Result<Vec<(String, String, String, String)>> {
+    let mut stmt =
+        conn.prepare("SELECT source, name, address, date FROM signals WHERE address != ''")?;
+    let rows = stmt.query_map([], |r| {
+        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+    })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 

@@ -208,12 +208,31 @@ fn electrical_keyword_and_valuation() {
 
     let row = json!({"description": "new kitchen circuits for restaurant", "permit_valuation": "75000"});
     let (score, reasons) = score_electrical(&row);
-    assert_eq!(score, 3); // keyword +2, valuation > 50k +1
-    assert!(reasons.iter().any(|r| r.contains("kitchen")));
+    assert_eq!(score, 3); // strong keyword +2, valuation > 50k +1
     assert!(reasons.iter().any(|r| r.contains("restaurant")));
+    assert!(reasons.iter().any(|r| r.contains("valuation")));
 
     let row = json!({"description": "bakery panel upgrade", "permit_valuation": "50000"});
     assert_eq!(score_electrical(&row).0, 2, "exactly 50k should not add valuation point");
+}
+
+#[test]
+fn trade_kitchen_alone_is_weak() {
+    // Residential remodel noise: "kitchen" alone scores 1, below the storage threshold.
+    let row = json!({"description": "kitchen remodel", "permit_valuation": ""});
+    let (score, reasons) = score_electrical(&row);
+    assert_eq!(score, 1);
+    assert!(reasons.iter().any(|r| r.contains("keyword: kitchen")));
+
+    // ... but kitchen + a big valuation still reaches the storage threshold.
+    let row = json!({"description": "kitchen remodel", "permit_valuation": "90000"});
+    assert_eq!(score_electrical(&row).0, 2);
+
+    // "commercial kitchen" is a strong hit.
+    let row = json!({"description": "install hood in commercial kitchen", "permit_valuation": ""});
+    let (score, reasons) = score_plumbing(&row);
+    assert_eq!(score, 2);
+    assert!(reasons.iter().any(|r| r.contains("commercial kitchen")));
 }
 
 #[test]
@@ -229,4 +248,22 @@ fn plumbing_grease_keyword() {
     let row = json!({"description": "water heater replacement", "valuation": "80000"});
     let (score, _) = score_plumbing(&row);
     assert_eq!(score, 1, "valuation alone scores 1, below the storage threshold");
+}
+
+#[test]
+fn trade_bar_excludes_residential_compounds() {
+    // "wet bar" / "grab bar" are residential remodel noise.
+    for desc in ["add 2 bedrooms, new wet bar", "install grab bar in bathroom", "towel bar replacement"] {
+        let row = json!({"description": desc, "permit_valuation": ""});
+        assert_eq!(score_electrical(&row).0, 0, "{desc:?} should not score");
+    }
+
+    // Real bars still hit: "wine bar", "juice bar", bare "bar".
+    let row = json!({"description": "wine bar buildout", "permit_valuation": ""});
+    let (score, reasons) = score_electrical(&row);
+    assert_eq!(score, 2);
+    assert!(reasons.iter().any(|r| r.contains("bar")));
+
+    let row = json!({"description": "bar and restaurant light remodel", "valuation": ""});
+    assert_eq!(score_plumbing(&row).0, 2);
 }

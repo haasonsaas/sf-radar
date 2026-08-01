@@ -11,7 +11,7 @@ Rows from multiple SF open-data sources are deduped into a local SQLite database
 | `business` | `g8m3-pdis` Registered Business Locations | New DBAs, food/retail NAICS codes |
 | `permit` | `i98e-djp9` Building Permits | Tenant improvements, change-of-use, buildout costs |
 | `entertainment` | `76g9-59eq` Places of Entertainment | New venues (snapshot dataset, no date field — new rows surface on first appearance) |
-| `health` | `tvy3-wexg` Health Inspections 2024+ | A business's first health inspection on record — usually means it's about to open |
+| `health` | `tvy3-wexg` Health Inspections 2024+ | A business's first health inspection since 2024 — usually means it's about to open |
 | `mobile_food` | `rqzj-sfat` Mobile Food Facility Permits | New food trucks and carts |
 | `electrical` | `ftty-kx6y` Electrical Permits | Kitchen/restaurant wiring buildouts |
 | `plumbing` | `a6aw-rudh` Plumbing Permits | Grease traps and restaurant plumbing buildouts |
@@ -53,9 +53,11 @@ Data is stored in `~/.local/share/sf-radar/radar.db` (override with `--db`). If 
 - **Business registrations**: +2 for food-service (NAICS 722x) or retail (NAICS 44/45) filings, +1 when the DBA name differs from the ownership entity
 - **Building permits**: +2 for description keywords (restaurant, cafe, coffee, bakery, bar, boba, retail, storefront…), +1 for "change of use" / "tenant improvement", +1 for a restaurant/retail proposed use, +1 for buildout cost over $100k
 - **Entertainment venues**: +2 base, +1 when a license type is listed
-- **Health inspections**: +3 for a permit number's first inspection on record (routine re-inspections are dropped at ingest)
+- **Health inspections**: +3 for a permit number's first inspection since 2024 (routine re-inspections are dropped at ingest). The initial 2024–now backfill is stored pre-seen — every existing facility has a "first since 2024", so only first-inspections found by incremental fetches after the radar is live alert
 - **Mobile food**: +2 base, +1 for trucks
-- **Electrical / plumbing permits**: +2 for buildout keywords (restaurant, kitchen, food service, cafe, bar, bakery — plus "grease" for plumbing), +1 for valuation over $50k; only keyword hits are stored
+- **Electrical / plumbing permits**: +2 for strong buildout keywords (restaurant, food service, cafe, cafeteria, bakery, commercial kitchen — plus "grease" for plumbing, and "bar" as a standalone word excluding wet/grab/towel bar), +1 for "kitchen" alone, +1 for valuation over $50k; only rows scoring ≥ 2 are stored
+
+**Corroboration**: at digest time, an entry gets +2 when other sources have filings at the same address (addresses are normalized across formats — case, whitespace, ST/STREET, 1ST/FIRST, unit designators stripped). Corroboration matches against full DB history including already-seen rows, and the bonus is display-only — the stored score is untouched.
 
 Digest buckets: 🔥 score ≥ 4, 👀 score 2–3. Entries are labeled with their source, e.g. `[health]`.
 

@@ -15,6 +15,13 @@ pub struct Source {
     /// the whole thing every run; new rows surface because they weren't in
     /// `signals` before (their date is set to first_seen on insert).
     pub date_field: Option<&'static str>,
+    /// Where to fetch from on the initial backfill (no stored watermark)
+    /// instead of the default 90 days ago.
+    pub backfill_start: Option<&'static str>,
+    /// When true, rows inserted during the initial backfill (no prior
+    /// watermark) are stored pre-seen — historical "firsts" are noise; only
+    /// ones discovered by incremental fetches after the radar is live alert.
+    pub quiet_backfill: bool,
     /// Only store rows scoring at least this (huge datasets filter at ingest).
     pub min_store_score: u32,
     pub external_id: fn(&Value) -> String,
@@ -66,7 +73,7 @@ fn no_neighborhood(_row: &Value) -> String {
     String::new()
 }
 
-/// Health inspections: +3 only when this is the first inspection on record
+/// Health inspections: +3 only when this is the first inspection since 2024
 /// for the permit_number (i.e. nothing stored for it yet — ingest runs in
 /// inspection_date order, so any stored row for the permit is earlier).
 pub fn score_health(row: &Value, conn: &Connection) -> (u32, Vec<String>) {
@@ -76,7 +83,7 @@ pub fn score_health(row: &Value, conn: &Connection) -> (u32, Vec<String>) {
     if has_earlier {
         (0, Vec::new())
     } else {
-        (3, vec!["first health inspection on record".to_string()])
+        (3, vec!["first health inspection since 2024".to_string()])
     }
 }
 
@@ -93,6 +100,8 @@ pub fn all() -> Vec<Source> {
         Source {
             key: "business",
             dataset: "g8m3-pdis",
+            backfill_start: None,
+            quiet_backfill: false,
             date_field: Some("dba_start_date"),
             min_store_score: 0,
             external_id: |r| f(r, "uniqueid"),
@@ -104,6 +113,8 @@ pub fn all() -> Vec<Source> {
         Source {
             key: "permit",
             dataset: "i98e-djp9",
+            backfill_start: None,
+            quiet_backfill: false,
             date_field: Some("filed_date"),
             min_store_score: 0,
             external_id: |r| f(r, "permit_number"),
@@ -115,6 +126,8 @@ pub fn all() -> Vec<Source> {
         Source {
             key: "entertainment",
             dataset: "76g9-59eq",
+            backfill_start: None,
+            quiet_backfill: false,
             date_field: None, // snapshot
             min_store_score: 0,
             external_id: |r| f(r, "permit_number"),
@@ -126,6 +139,8 @@ pub fn all() -> Vec<Source> {
         Source {
             key: "health",
             dataset: "tvy3-wexg",
+            backfill_start: Some("2024-01-01"), // dataset covers 2024-present
+            quiet_backfill: true,
             date_field: Some("inspection_date"),
             min_store_score: 1, // only store first-inspection signals
             external_id: health_id,
@@ -137,6 +152,8 @@ pub fn all() -> Vec<Source> {
         Source {
             key: "mobile_food",
             dataset: "rqzj-sfat",
+            backfill_start: None,
+            quiet_backfill: false,
             date_field: Some("received"),
             min_store_score: 0,
             external_id: |r| f(r, "objectid"),
@@ -148,6 +165,8 @@ pub fn all() -> Vec<Source> {
         Source {
             key: "electrical",
             dataset: "ftty-kx6y",
+            backfill_start: None,
+            quiet_backfill: false,
             date_field: Some("filed_date"),
             min_store_score: 2,
             external_id: |r| f(r, "permit_number"),
@@ -159,6 +178,8 @@ pub fn all() -> Vec<Source> {
         Source {
             key: "plumbing",
             dataset: "a6aw-rudh",
+            backfill_start: None,
+            quiet_backfill: false,
             date_field: Some("filed_date"),
             min_store_score: 2,
             external_id: |r| f(r, "permit_number"),

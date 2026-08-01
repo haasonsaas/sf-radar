@@ -98,16 +98,25 @@ fn fetch(db_path: &std::path::Path, since: Option<String>, full: bool) -> Result
     let mut total = 0usize;
     for source in sources::all() {
         let watermark_key = format!("watermark:{}", source.key);
+        let stored_watermark = db::get_watermark(&conn, &watermark_key)?;
+        let backfill_from = || {
+            source
+                .backfill_start
+                .map(str::to_string)
+                .unwrap_or_else(|| days_ago(FULL_BACKFILL_DAYS))
+        };
+        // Quiet backfill: only on the very first fetch of this source (no
+        // stored watermark) and not for explicit --since runs.
+        let quiet = source.quiet_backfill && stored_watermark.is_none() && since.is_none();
 
         let (rows, effective_since) = match source.date_field {
             Some(date_field) => {
-                let effective_since = if full {
-                    days_ago(FULL_BACKFILL_DAYS)
-                } else if let Some(s) = &since {
+                let effective_since = if let Some(s) = &since {
                     s.clone()
+                } else if full {
+                    backfill_from()
                 } else {
-                    db::get_watermark(&conn, &watermark_key)?
-                        .unwrap_or_else(|| days_ago(FULL_BACKFILL_DAYS))
+                    stored_watermark.clone().unwrap_or_else(backfill_from)
                 };
                 println!(
                     "Fetching {} since {} ...",
@@ -165,6 +174,7 @@ fn fetch(db_path: &std::path::Path, since: Option<String>, full: bool) -> Result
                     score: sc,
                     reasons,
                     first_seen: today.clone(),
+                    seen: quiet,
                 },
             )?;
             stored += 1;
@@ -206,7 +216,14 @@ fn digest_cmd(
         .format("%Y-%m-%d")
         .to_string();
 
-    let entries = db::unseen_signals(&conn, &cutoff, &today(), min_score, neighborhood)?;
+    let entries = {
+        let mut entries = db::unseen_signals(&conn, &cutoff, &today(), min_score, neighborhood)?;
+        // Display-time corroboration: +2 when other sources have filings at
+        // the same address. Not written back to the DB.
+        let index = digest::AddressIndex::build(db::all_addresses(&conn)?);
+        digest::apply_corroboration(&mut entries, &index);
+        entries
+    };
 
     print!("{}", digest::render(&entries, min_score, md, days));
 

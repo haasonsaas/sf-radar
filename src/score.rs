@@ -135,40 +135,68 @@ pub fn score_mobile_food(row: &Value) -> (u32, Vec<String>) {
     (score, reasons)
 }
 
-/// Keywords in trade-permit descriptions that signal a food/retail buildout.
-const TRADE_KEYWORDS: &[&str] = &[
+/// Strong keywords in trade-permit descriptions: near-certain food/retail
+/// buildouts (+2). "commercial kitchen" is strong; "kitchen" alone is not.
+/// "bar" is handled separately — as a substring it matches "wet bar",
+/// "grab bar", and "towel bar" in residential remodels.
+const TRADE_STRONG_KEYWORDS: &[&str] = &[
     "restaurant",
-    "kitchen",
     "food service",
     "cafe",
-    "bar",
+    "cafeteria",
     "bakery",
+    "commercial kitchen",
 ];
 
-/// Same, plus "grease" — a grease trap/interceptor is a restaurant buildout tell.
-const PLUMBING_KEYWORDS: &[&str] = &[
+/// Plumbing adds "grease" — a grease trap/interceptor is a restaurant tell.
+const PLUMBING_STRONG_KEYWORDS: &[&str] = &[
     "restaurant",
-    "kitchen",
     "food service",
     "cafe",
-    "bar",
+    "cafeteria",
     "bakery",
+    "commercial kitchen",
     "grease",
 ];
 
-fn score_trade_permit(row: &Value, keywords: &[&str], cost_field: &str) -> (u32, Vec<String>) {
+/// Weak keyword (+1): "kitchen" alone is usually a residential remodel.
+const TRADE_WEAK_KEYWORD: &str = "kitchen";
+
+/// "bar" counts only as a standalone word that isn't part of a residential
+/// compound: "wet bar", "grab bar", "towel bar", "handle bar".
+fn has_bar_keyword(desc: &str) -> bool {
+    let words: Vec<&str> = desc
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    words.iter().enumerate().any(|(i, w)| {
+        *w == "bar"
+            && !matches!(
+                i.checked_sub(1).map(|j| words[j]),
+                Some("wet" | "grab" | "towel" | "handle")
+            )
+    })
+}
+
+fn score_trade_permit(row: &Value, strong_keywords: &[&str], cost_field: &str) -> (u32, Vec<String>) {
     let mut score = 0;
     let mut reasons = Vec::new();
 
     let desc = field(row, "description").to_lowercase();
-    let hits: Vec<&str> = keywords
+    let mut hits: Vec<&str> = strong_keywords
         .iter()
         .copied()
         .filter(|k| desc.contains(k))
         .collect();
+    if has_bar_keyword(&desc) {
+        hits.push("bar");
+    }
     if !hits.is_empty() {
         score += 2;
         reasons.push(format!("keyword: {}", hits.join(", ")));
+    } else if desc.contains(TRADE_WEAK_KEYWORD) {
+        score += 1;
+        reasons.push(format!("keyword: {TRADE_WEAK_KEYWORD}"));
     }
 
     if let Some(valuation) = field_num(row, cost_field)
@@ -183,10 +211,10 @@ fn score_trade_permit(row: &Value, keywords: &[&str], cost_field: &str) -> (u32,
 
 /// Score an Electrical Permit row.
 pub fn score_electrical(row: &Value) -> (u32, Vec<String>) {
-    score_trade_permit(row, TRADE_KEYWORDS, "permit_valuation")
+    score_trade_permit(row, TRADE_STRONG_KEYWORDS, "permit_valuation")
 }
 
 /// Score a Plumbing Permit row.
 pub fn score_plumbing(row: &Value) -> (u32, Vec<String>) {
-    score_trade_permit(row, PLUMBING_KEYWORDS, "valuation")
+    score_trade_permit(row, PLUMBING_STRONG_KEYWORDS, "valuation")
 }

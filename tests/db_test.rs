@@ -19,6 +19,7 @@ fn signal(source: &'static str, id: &str, neighborhood: &str) -> db::Signal {
         score: 3,
         reasons: vec!["test".to_string()],
         first_seen: "2026-07-01".to_string(),
+        seen: false,
     }
 }
 
@@ -238,4 +239,52 @@ fn normalize_date_handles_iso_and_compact() {
     assert_eq!(db::normalize_date("20260731"), "2026-07-31");
     assert_eq!(db::normalize_date("2026-07-31"), "2026-07-31");
     assert_eq!(db::normalize_date(""), "");
+}
+
+#[test]
+fn health_source_backfill_config() {
+    let health = sources::all()
+        .into_iter()
+        .find(|s| s.key == "health")
+        .unwrap();
+    assert_eq!(health.backfill_start, Some("2024-01-01"));
+    assert!(health.quiet_backfill);
+    // Nobody else is quiet.
+    for s in sources::all() {
+        if s.key != "health" {
+            assert!(!s.quiet_backfill, "{} should not be quiet", s.key);
+            assert_eq!(s.backfill_start, None);
+        }
+    }
+}
+
+#[test]
+fn quiet_backfill_rows_stored_seen_incremental_unseen() {
+    let conn = test_conn();
+
+    // Initial backfill insert: stored pre-seen.
+    let mut backfill = signal("health", "P1-2024-03-01T00:00:00.000", "Mission");
+    backfill.seen = true;
+    db::upsert_signal(&conn, &backfill).unwrap();
+
+    // Incremental insert after the radar is live: unseen.
+    let incremental = signal("health", "P2-2026-08-01T00:00:00.000", "Mission");
+    db::upsert_signal(&conn, &incremental).unwrap();
+
+    let seen_of = |id: &str| -> u32 {
+        conn.query_row(
+            "SELECT seen FROM signals WHERE source='health' AND external_id=?1",
+            [id],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(seen_of("P1-2024-03-01T00:00:00.000"), 1);
+    assert_eq!(seen_of("P2-2026-08-01T00:00:00.000"), 0);
+
+    // A later non-quiet re-fetch of a backfill row must not flip seen back.
+    let mut refetch = signal("health", "P1-2024-03-01T00:00:00.000", "Mission");
+    refetch.seen = false;
+    db::upsert_signal(&conn, &refetch).unwrap();
+    assert_eq!(seen_of("P1-2024-03-01T00:00:00.000"), 1);
 }
