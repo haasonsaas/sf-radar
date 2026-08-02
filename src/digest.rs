@@ -62,6 +62,13 @@ impl Bucket {
             Bucket::Watch => "👀 Worth watching",
         }
     }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Bucket::Strong => "strong",
+            Bucket::Watch => "watch",
+        }
+    }
 }
 
 pub fn bucket_for(score: u32) -> Option<Bucket> {
@@ -109,24 +116,19 @@ fn format_entry(entry: &DigestEntry, markdown: bool) -> String {
     out
 }
 
-/// Render the digest: buckets ordered strong-first. Within a bucket,
-/// neighborhood groups are ordered by their best entry (score desc, date
-/// desc), and entries within a neighborhood the same way, so the strongest
-/// signals float to the top. Entries below `min_score` are filtered out.
-pub fn render(entries: &[DigestEntry], min_score: u32, markdown: bool, days: u32) -> String {
-    let mut out = String::new();
-    let header = format!("SF Opening Radar — last {days} days");
-    if markdown {
-        out.push_str(&format!("# {header}\n"));
-    } else {
-        out.push_str(&format!("{header}\n"));
-    }
+/// Buckets of neighborhood-name → entries groups, in display order.
+type Grouped<'a> = Vec<(Bucket, Vec<(String, Vec<&'a DigestEntry>)>)>;
 
+/// Group entries for display: buckets strong-first, neighborhood groups
+/// ordered by their best entry (score desc, date desc), and entries within a
+/// neighborhood the same way, so the strongest signals float to the top.
+/// Entries below `min_score` are filtered out.
+fn grouped(entries: &[DigestEntry], min_score: u32) -> Grouped<'_> {
     let by_score = |a: &&DigestEntry, b: &&DigestEntry| {
         b.score.cmp(&a.score).then(b.date.cmp(&a.date))
     };
 
-    let mut total = 0usize;
+    let mut out = Vec::new();
     for bucket in [Bucket::Strong, Bucket::Watch] {
         let mut by_hood: BTreeMap<String, Vec<&DigestEntry>> = BTreeMap::new();
         for entry in entries
@@ -146,7 +148,32 @@ pub fn render(entries: &[DigestEntry], min_score: u32, markdown: bool, days: u32
         groups.sort_by(|a, b| {
             by_score(&a.1[0], &b.1[0]).then_with(|| a.0.cmp(&b.0))
         });
+        out.push((bucket, groups));
+    }
+    out
+}
 
+/// Entries flattened in display order (best first) — the same order `render`
+/// prints them and `render_json` emits them.
+pub fn ordered(entries: &[DigestEntry], min_score: u32) -> Vec<&DigestEntry> {
+    grouped(entries, min_score)
+        .into_iter()
+        .flat_map(|(_, groups)| groups.into_iter().flat_map(|(_, group)| group))
+        .collect()
+}
+
+/// Render the digest: buckets ordered strong-first (see `grouped`).
+pub fn render(entries: &[DigestEntry], min_score: u32, markdown: bool, days: u32) -> String {
+    let mut out = String::new();
+    let header = format!("SF Opening Radar — last {days} days");
+    if markdown {
+        out.push_str(&format!("# {header}\n"));
+    } else {
+        out.push_str(&format!("{header}\n"));
+    }
+
+    let mut total = 0usize;
+    for (bucket, groups) in grouped(entries, min_score) {
         out.push('\n');
         if markdown {
             out.push_str(&format!("## {}\n", bucket.title()));
@@ -175,6 +202,65 @@ pub fn render(entries: &[DigestEntry], min_score: u32, markdown: bool, days: u32
         out.push_str(&format!("\n{total} new signal(s).\n"));
     }
     out
+}
+
+/// Machine-readable form of one digest entry. Field set and order are part
+/// of the tool's JSON contract — a sibling project implements the same shape.
+#[derive(Debug, serde::Serialize)]
+pub struct JsonEntry {
+    pub source: String,
+    pub id: String,
+    pub name: String,
+    pub address: String,
+    pub neighborhood: String,
+    pub date: String,
+    pub score: u32,
+    pub bucket: String,
+    pub reasons: Vec<String>,
+    pub url: String,
+    pub description: String,
+}
+
+/// Top-level `--json` output (see `render_json`).
+#[derive(Debug, serde::Serialize)]
+pub struct JsonDigest {
+    pub tool: String,
+    pub generated_at: String,
+    pub window_days: u32,
+    pub min_score: u32,
+    pub archived: usize,
+    pub entries: Vec<JsonEntry>,
+}
+
+/// Machine-readable digest, same entry order as the prose digest (best
+/// first). Buckets use the post-corroboration score. `url` is always empty
+/// (this tool has no per-row URL); `description` is the permit snippet or "".
+pub fn render_json(entries: &[DigestEntry], min_score: u32, days: u32, archived: usize) -> String {
+    let entries = ordered(entries, min_score)
+        .into_iter()
+        .map(|e| JsonEntry {
+            source: e.source.clone(),
+            id: e.id.clone(),
+            name: e.name.clone(),
+            address: e.address.clone(),
+            neighborhood: e.neighborhood.clone(),
+            date: e.date.clone(),
+            score: e.score,
+            bucket: bucket_for(e.score).map_or("watch", Bucket::as_str).to_string(),
+            reasons: e.reasons.clone(),
+            url: String::new(),
+            description: e.description.clone().unwrap_or_default(),
+        })
+        .collect();
+    let digest = JsonDigest {
+        tool: "sf-radar".to_string(),
+        generated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        window_days: days,
+        min_score,
+        archived,
+        entries,
+    };
+    serde_json::to_string_pretty(&digest).expect("JsonDigest serialization cannot fail")
 }
 
 #[derive(Debug, Clone)]

@@ -1,4 +1,5 @@
 pub mod address;
+pub mod config;
 pub mod db;
 pub mod digest;
 pub mod name;

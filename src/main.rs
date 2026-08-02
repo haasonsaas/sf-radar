@@ -4,7 +4,7 @@ use anyhow::Result;
 use chrono::{Duration, Local};
 use clap::{Parser, Subcommand};
 
-use sf_radar::{db, digest, score, socrata, sources};
+use sf_radar::{config, db, digest, score, socrata, sources};
 
 const FULL_BACKFILL_DAYS: i64 = 90;
 
@@ -49,6 +49,12 @@ enum Command {
         /// Emit markdown instead of plain text
         #[arg(long)]
         md: bool,
+        /// Emit machine-readable JSON instead of prose
+        #[arg(long, conflicts_with = "md")]
+        json: bool,
+        /// Print the digest without marking signals seen or archiving stale ones
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -82,16 +88,28 @@ fn main() -> Result<()> {
             min_score,
             neighborhood,
             md,
-        } => digest_cmd(&db_path, days, min_score, neighborhood.as_deref(), md)?,
+            json,
+            dry_run,
+        } => digest_cmd(
+            &db_path,
+            days,
+            min_score,
+            neighborhood.as_deref(),
+            md,
+            json,
+            dry_run,
+        )?,
     }
     Ok(())
 }
 
 fn fetch(db_path: &std::path::Path, since: Option<String>, full: bool) -> Result<()> {
     let conn = db::open(db_path)?;
-    let client = socrata::SocrataClient::new()?;
+    let cfg = config::load(db_path);
+    let client =
+        socrata::SocrataClient::new(config::app_token(std::env::var("SOCRATA_APP_TOKEN").ok(), &cfg))?;
     if client.has_app_token() {
-        println!("Using SOCRATA_APP_TOKEN.");
+        println!("Using Socrata app token.");
     }
 
     let today = today();
@@ -210,6 +228,8 @@ fn digest_cmd(
     min_score: u32,
     neighborhood: Option<&str>,
     md: bool,
+    json: bool,
+    dry_run: bool,
 ) -> Result<()> {
     let conn = db::open(db_path)?;
     let cutoff = (Local::now() - Duration::days(days as i64))
@@ -227,12 +247,21 @@ fn digest_cmd(
         entries
     };
 
-    print!("{}", digest::render(&entries, min_score, md, days));
+    // --dry-run prints without mutating the database at all.
+    let archived = if dry_run {
+        0
+    } else {
+        db::mark_seen(&conn, &entries)?;
+        db::archive_before(&conn, &cutoff)?
+    };
 
-    db::mark_seen(&conn, &entries)?;
-    let archived = db::archive_before(&conn, &cutoff)?;
-    if archived > 0 {
-        println!("(archived {archived} signals older than the window)");
+    if json {
+        println!("{}", digest::render_json(&entries, min_score, days, archived));
+    } else {
+        print!("{}", digest::render(&entries, min_score, md, days));
+        if archived > 0 {
+            println!("(archived {archived} signals older than the window)");
+        }
     }
     Ok(())
 }

@@ -38,15 +38,65 @@ Weekly cron example:
 0 8 * * 1 cd /path/to/sf-radar && cargo run --release -q -- fetch && cargo run --release -q -- digest
 ```
 
-Data is stored in `~/.local/share/sf-radar/radar.db` (override with `--db`). If you hit Socrata rate limits, get a free app token from data.sfgov.org and export `SOCRATA_APP_TOKEN`.
+Data is stored in `~/.local/share/sf-radar/radar.db` (override with `--db`). If you hit Socrata rate limits, get a free app token from data.sfgov.org and export `SOCRATA_APP_TOKEN` — or put it in `config.toml` next to the database (see Automation).
 
 ## Commands
 
 | Command | What it does |
 | --- | --- |
 | `sf-radar fetch [--full] [--since DATE]` | Incrementally pull all sources; `--full` backfills 90 days |
-| `sf-radar digest [--days N] [--min-score N] [--neighborhood NAME] [--md]` | Print unseen signals and mark them seen |
+| `sf-radar digest [--days N] [--min-score N] [--neighborhood NAME] [--md] [--json] [--dry-run]` | Print unseen signals and mark them seen |
 | `sf-radar init` | Create the database (auto-run by other commands) |
+
+## Automation
+
+`digest --json` emits the digest as machine-readable JSON on stdout (conflicts with `--md`). Entries are ordered best-first, same as the prose digest; `score` and `bucket` include the display-time corroboration/name bonuses. `url` is always `""` (this tool has no per-row URL) and `description` is the permit-description snippet, or `""` when the source has none.
+
+```json
+{
+  "tool": "sf-radar",
+  "generated_at": "2026-08-02T03:13:00Z",
+  "window_days": 30,
+  "min_score": 2,
+  "archived": 0,
+  "entries": [
+    {
+      "source": "business",
+      "id": "1234567-2026",
+      "name": "Meek Coffee",
+      "address": "2360 3rd St",
+      "neighborhood": "Potrero Hill",
+      "date": "2026-07-09",
+      "score": 5,
+      "bucket": "strong",
+      "reasons": ["food-service NAICS", "corroborated by permit: Permit 202607123456 (2026-07-10)"],
+      "url": "",
+      "description": ""
+    }
+  ]
+}
+```
+
+`--json` still marks entries seen and archives stale rows, so the next run only reports new signals. Pass `--dry-run` to print the digest (prose or JSON) without touching the database — useful for polling the same window repeatedly:
+
+```bash
+sf-radar digest --days 30 --json --dry-run | jq '.entries[] | select(.bucket == "strong")'
+```
+
+The Socrata app token can also live in `config.toml` in the same directory as the database (e.g. `~/.local/share/sf-radar/config.toml`):
+
+```toml
+socrata_app_token = "your-token-here"
+```
+
+The `SOCRATA_APP_TOKEN` environment variable wins over the config file. A missing config file is fine; an invalid one logs a warning on stderr and is ignored.
+
+Cron example — fetch every 6 hours, mail a weekly JSON digest of strong signals:
+
+```
+0 */6 * * * /path/to/sf-radar fetch >> /tmp/sf-radar.log 2>&1
+0 8 * * 1 /path/to/sf-radar digest --days 7 --json | jq -c '.entries[]' >> /tmp/sf-radar-digest.jsonl
+```
 
 ## How scoring works
 

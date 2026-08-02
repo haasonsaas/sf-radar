@@ -18,14 +18,13 @@ pub struct SocrataClient {
 }
 
 impl SocrataClient {
-    pub fn new() -> reqwest::Result<Self> {
+    /// `app_token` is the resolved Socrata app token (see `config::app_token`);
+    /// sent as the X-App-Token header when present.
+    pub fn new(app_token: Option<String>) -> reqwest::Result<Self> {
         let client = reqwest::blocking::Client::builder()
             .user_agent("sf-radar/0.1")
             .timeout(std::time::Duration::from_secs(120))
             .build()?;
-        let app_token = std::env::var("SOCRATA_APP_TOKEN")
-            .ok()
-            .filter(|t| !t.trim().is_empty());
         Ok(Self { client, app_token })
     }
 
