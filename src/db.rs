@@ -234,13 +234,18 @@ pub fn unseen_signals(
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-/// Mark seen every unseen row with a date older than `cutoff` (any score,
-/// any source) — they predate the digest window and would never be shown by
-/// default. Rows with an empty date are left alone. Returns the count.
-pub fn archive_before(conn: &Connection, cutoff: &str) -> Result<usize> {
+/// Mark seen every unseen row with a date older than `cutoff` and a score of
+/// at least `min_score` — the set the digest would have emitted, shifted
+/// older than the window. Rows with an empty date are left alone. Returns the
+/// count.
+///
+/// Sub-min-score rows were never displayable at this threshold, so they stay
+/// unseen: a later digest with a lower `--min-score` can still surface them
+/// (and marks them seen itself).
+pub fn archive_before(conn: &Connection, cutoff: &str, min_score: u32) -> Result<usize> {
     let n = conn.execute(
-        "UPDATE signals SET seen = 1 WHERE seen = 0 AND date != '' AND date < ?1",
-        params![cutoff],
+        "UPDATE signals SET seen = 1 WHERE seen = 0 AND date != '' AND date < ?1 AND score >= ?2",
+        params![cutoff, min_score],
     )?;
     Ok(n)
 }

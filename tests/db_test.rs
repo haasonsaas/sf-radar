@@ -298,10 +298,13 @@ fn archive_before_marks_only_stale_dated_rows() {
     in_window.date = "2026-07-20".to_string();
     let mut no_date = signal("permit", "nodate", "Mission");
     no_date.date = String::new();
+    let mut at_threshold = signal("business", "atthreshold", "Mission");
+    at_threshold.date = "2025-12-01".to_string();
+    at_threshold.score = 2; // == min_score: archived
     let mut low_score = signal("business", "lowscore", "Mission");
     low_score.date = "2025-12-01".to_string();
-    low_score.score = 0; // any score gets archived
-    for s in [&old, &in_window, &no_date, &low_score] {
+    low_score.score = 1; // below min_score: survives for lower-threshold deep-dives
+    for s in [&old, &in_window, &no_date, &at_threshold, &low_score] {
         db::upsert_signal(&conn, s).unwrap();
     }
     // One already-seen stale row is not re-counted.
@@ -310,8 +313,8 @@ fn archive_before_marks_only_stale_dated_rows() {
     seen_old.seen = true;
     db::upsert_signal(&conn, &seen_old).unwrap();
 
-    let archived = db::archive_before(&conn, "2026-07-02").unwrap();
-    assert_eq!(archived, 2, "old + lowscore archived, not seenold");
+    let archived = db::archive_before(&conn, "2026-07-02", 2).unwrap();
+    assert_eq!(archived, 2, "old + atthreshold archived, not seenold or lowscore");
 
     let seen_of = |id: &str| -> u32 {
         conn.query_row(
@@ -322,10 +325,11 @@ fn archive_before_marks_only_stale_dated_rows() {
         .unwrap()
     };
     assert_eq!(seen_of("old"), 1);
-    assert_eq!(seen_of("lowscore"), 1);
+    assert_eq!(seen_of("atthreshold"), 1, "score == min_score is archived");
+    assert_eq!(seen_of("lowscore"), 0, "sub-min-score rows stay unseen");
     assert_eq!(seen_of("recent"), 0, "in-window rows stay unseen");
     assert_eq!(seen_of("nodate"), 0, "empty-date rows are not touched");
-    assert_eq!(db::archive_before(&conn, "2026-07-02").unwrap(), 0);
+    assert_eq!(db::archive_before(&conn, "2026-07-02", 2).unwrap(), 0);
 }
 
 #[test]

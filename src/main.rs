@@ -252,7 +252,7 @@ fn digest_cmd(
         0
     } else {
         db::mark_seen(&conn, &entries)?;
-        db::archive_before(&conn, &cutoff)?
+        db::archive_before(&conn, &cutoff, min_score)?
     };
 
     if json {
