@@ -4,7 +4,7 @@ use anyhow::Result;
 use chrono::{Duration, Local};
 use clap::{Parser, Subcommand};
 
-use sf_radar::{config, db, digest, score, socrata, sources};
+use sf_radar::{abc, config, db, digest, score, socrata, sources};
 
 const FULL_BACKFILL_DAYS: i64 = 90;
 
@@ -213,6 +213,13 @@ fn fetch(db_path: &std::path::Path, since: Option<String>, full: bool) -> Result
         total += stored;
     }
 
+    // ABC liquor licenses come from a scraped HTML report, not Socrata; a
+    // failure there (site change, outage) shouldn't sink the whole fetch.
+    match fetch_abc(&conn, since.as_deref(), &today) {
+        Ok(stored) => total += stored,
+        Err(e) => eprintln!("  abc fetch failed, skipping this run: {e:#}"),
+    }
+
     println!("\nDone — {total} signals stored in {}", db_path.display());
     println!("\nTip: keep the radar warm with cron (`crontab -e`):");
     let exe = std::env::current_exe()
@@ -220,6 +227,70 @@ fn fetch(db_path: &std::path::Path, since: Option<String>, full: bool) -> Result
         .unwrap_or_else(|_| "sf-radar".to_string());
     println!("  0 */6 * * * {exe} fetch --db {} >> /tmp/sf-radar.log 2>&1", db_path.display());
     Ok(())
+}
+
+/// Fetch ABC liquor-license applications (scraped daily reports). One HTTP
+/// request per report day since the watermark; SF rows scoring >= 2 are
+/// stored under source "abc".
+fn fetch_abc(conn: &rusqlite::Connection, since: Option<&str>, today: &str) -> Result<usize> {
+    let watermark = db::get_watermark(conn, "watermark:abc")?;
+    let dates = abc::dates_to_fetch(watermark.as_deref(), since, abc::newest_report_day());
+    if dates.is_empty() {
+        println!("Fetching abc (liquor licenses): up to date");
+        return Ok(0);
+    }
+    println!(
+        "Fetching abc (liquor licenses), {} report day(s) from {} ...",
+        dates.len(),
+        dates[0]
+    );
+
+    let client = abc::AbcClient::new()?;
+    let mut stored = 0usize;
+    for date in &dates {
+        for app in client.new_applications(*date)? {
+            let (sc, reasons) = abc::score_license_type(app.license_type);
+            if sc < 2 {
+                continue;
+            }
+            db::upsert_signal(
+                conn,
+                &db::Signal {
+                    source: "abc",
+                    external_id: app.license_number.clone(),
+                    name: app.name().to_string(),
+                    address: app.street.clone(),
+                    date: date.format("%Y-%m-%d").to_string(),
+                    neighborhood: String::new(),
+                    raw: serde_json::json!({
+                        "license_number": app.license_number,
+                        "status": app.status,
+                        "license_type": app.license_type,
+                        "dba": app.dba,
+                        "owner": app.owner,
+                        "street": app.street,
+                        "city": app.city,
+                        "zip": app.zip,
+                    })
+                    .to_string(),
+                    score: sc,
+                    reasons,
+                    first_seen: today.to_string(),
+                    seen: false,
+                },
+            )?;
+            stored += 1;
+        }
+        // Be polite to the report endpoint between daily requests.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+    db::set_watermark(
+        conn,
+        "watermark:abc",
+        &dates.last().unwrap().format("%Y-%m-%d").to_string(),
+    )?;
+    println!("  {stored} stored");
+    Ok(stored)
 }
 
 fn digest_cmd(
