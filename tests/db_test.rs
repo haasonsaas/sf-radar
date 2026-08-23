@@ -24,6 +24,22 @@ fn signal(source: &'static str, id: &str, neighborhood: &str) -> db::Signal {
 }
 
 #[test]
+fn all_addresses_only_includes_signal_grade_rows() {
+    let conn = test_conn();
+    let mut office = signal("business", "office-tenant", "");
+    office.score = 1; // DBA differs from owner, non-food NAICS
+    db::upsert_signal(&conn, &office).unwrap();
+    let mut roof = signal("permit", "roof-repair", "");
+    roof.score = 0;
+    db::upsert_signal(&conn, &roof).unwrap();
+    db::upsert_signal(&conn, &signal("health", "cafe", "")).unwrap(); // score 3
+
+    let rows = db::all_addresses(&conn).unwrap();
+    let names: Vec<&str> = rows.iter().map(|(_, name, _, _)| name.as_str()).collect();
+    assert_eq!(names, ["Name cafe"], "only score >= 2 rows corroborate: {names:?}");
+}
+
+#[test]
 fn unseen_signals_carry_per_row_urls() {
     let conn = test_conn();
     db::upsert_signal(&conn, &signal("abc", "681355", "")).unwrap();

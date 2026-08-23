@@ -7,6 +7,23 @@ pub const CORROBORATION_BONUS: u32 = 2;
 /// Score bonus when other sources have filings under the same name.
 pub const NAME_BONUS: u32 = 1;
 
+/// Minimum stored score for a row to count as a corroborator (see
+/// `db::all_addresses`): the Watch-bucket threshold, i.e. the row is a
+/// signal on its own.
+pub const CORROBORATOR_MIN_SCORE: u32 = 2;
+
+/// Sources whose sub-threshold rows are never rescued by corroboration. A
+/// score-1 business registration means "a DBA that isn't food or retail
+/// registered somewhere in this building" — in a mixed-use tower that is
+/// any office tenant, not a venue signal.
+const NON_RESCUABLE_SOURCES: &[&str] = &["business"];
+
+/// Whether a row below `min_score` may be lifted into the digest by
+/// corroboration bonuses.
+pub fn rescue_eligible(source: &str) -> bool {
+    !NON_RESCUABLE_SOURCES.contains(&source)
+}
+
 /// Stored-score floor for selecting digest candidates: low enough that a row
 /// which display-time corroboration could lift to `min_score` is selected,
 /// but never below 1 (a score-0 row has no signal of its own to corroborate).
@@ -287,8 +304,16 @@ fn build_venue<'a>(entries: &'a [DigestEntry], idxs: &[usize], addresses: &Addre
         .cloned()
         .collect();
 
+    let name = if !namer.name.is_empty() {
+        namer.name.clone()
+    } else if !address.is_empty() {
+        address.clone()
+    } else {
+        "(unnamed)".to_string()
+    };
+
     Venue {
-        name: namer.name.clone(),
+        name,
         address,
         neighborhood,
         score,

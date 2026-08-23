@@ -254,10 +254,16 @@ pub fn archive_before(conn: &Connection, cutoff: &str, min_score: u32) -> Result
 
 /// (source, name, address, date) for every signal with an address — the
 /// corroboration index matches against full DB history, seen rows included.
+/// Only rows that are signals in their own right (stored score at or above
+/// `digest::CORROBORATOR_MIN_SCORE`) can corroborate: business registrations
+/// and building permits are stored down to score 0, and an office tenant's
+/// DBA or a roof repair in the same tower is not evidence of a venue.
 pub fn all_addresses(conn: &Connection) -> Result<Vec<(String, String, String, String)>> {
-    let mut stmt =
-        conn.prepare("SELECT source, name, address, date FROM signals WHERE address != ''")?;
-    let rows = stmt.query_map([], |r| {
+    let mut stmt = conn.prepare(
+        "SELECT source, name, address, date FROM signals
+         WHERE address != '' AND score >= ?1",
+    )?;
+    let rows = stmt.query_map(params![crate::digest::CORROBORATOR_MIN_SCORE], |r| {
         Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
