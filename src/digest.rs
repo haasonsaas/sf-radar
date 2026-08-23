@@ -344,7 +344,7 @@ impl NameIndex {
     pub fn build(rows: &[(String, String, String, String)]) -> Self {
         let mut by_name: HashMap<String, Vec<Corroborator>> = HashMap::new();
         for (source, row_name, _, date) in rows {
-            let key = name::normalize_name(row_name);
+            let key = name::match_key(row_name);
             if !name::is_matchable(&key) {
                 continue;
             }
@@ -359,7 +359,7 @@ impl NameIndex {
 
     /// Up to 2 corroborators from OTHER sources with the same name.
     pub fn corroborators(&self, source: &str, row_name: &str) -> Vec<&Corroborator> {
-        let key = name::normalize_name(row_name);
+        let key = name::match_key(row_name);
         if !name::is_matchable(&key) {
             return Vec::new();
         }

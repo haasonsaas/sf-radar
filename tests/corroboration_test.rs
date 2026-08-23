@@ -15,10 +15,34 @@ fn normalize_suffixes() {
     assert_eq!(normalize("685 Harrison Street"), "685 HARRISON ST");
     assert_eq!(normalize("3251 20th Av"), "3251 20TH AVE");
     assert_eq!(normalize("3251 20th Avenue"), "3251 20TH AVE");
-    assert_eq!(normalize("2675 Geary Bl"), "2675 GEARY BL"); // unknown suffix left alone
+    assert_eq!(normalize("2675 Geary Bl"), "2675 GEARY BLVD"); // DBI permit abbreviation
     assert_eq!(normalize("2675 Geary Boulevard"), "2675 GEARY BLVD");
     assert_eq!(normalize("10 Inverness Drive"), "10 INVERNESS DR");
     assert_eq!(normalize("10 Locksley Avenue"), "10 LOCKSLEY AVE");
+    assert_eq!(normalize("2675 Geary Xy"), "2675 GEARY XY"); // unknown suffix left alone
+}
+
+#[test]
+fn normalize_dbi_two_letter_suffixes() {
+    // Building/electrical/plumbing permits abbreviate suffixes to two letters;
+    // ABC and business registrations spell them out.
+    assert_eq!(normalize("1400 Geary Bl"), normalize("1400 GEARY BLVD"));
+    assert_eq!(normalize("100 Portola Wy"), normalize("100 PORTOLA WAY"));
+    assert_eq!(normalize("2 Great Hy"), normalize("2 GREAT HIGHWAY"));
+    assert_eq!(normalize("5 Alta Tr"), normalize("5 ALTA TERRACE"));
+}
+
+#[test]
+fn normalize_house_numbers() {
+    assert_eq!(normalize("ONE SANSOME ST"), "1 SANSOME ST");
+    assert_eq!(normalize("Two Embarcadero Center"), "2 EMBARCADERO CENTER");
+    assert_eq!(normalize("88-90 SPEAR ST"), "88 SPEAR ST");
+    assert_eq!(normalize("88-90 Spear St."), normalize("88 SPEAR ST"));
+    // Not a range: letter suffixes and a lone hyphen are left alone.
+    assert_eq!(normalize("88A SPEAR ST"), "88A SPEAR ST");
+    assert_eq!(normalize("88- SPEAR ST"), "88- SPEAR ST");
+    // Number words only canonicalize in house-number position.
+    assert_eq!(normalize("100 ONE WAY"), "100 ONE WAY");
 }
 
 #[test]
@@ -184,6 +208,33 @@ fn normalize_name_cases() {
     assert_eq!(normalize_name("The Knockout"), "THE KNOCKOUT", "THE is kept");
     assert_eq!(normalize_name("  Blue   Bottle  "), "BLUE BOTTLE");
     assert_eq!(normalize_name("LLC"), "", "all-suffix name normalizes to empty");
+}
+
+#[test]
+fn match_key_folds_plurals() {
+    use sf_radar::name::match_key;
+    assert_eq!(match_key("Super Duper Burgers"), match_key("SUPER DUPER BURGER"));
+    assert_eq!(match_key("Mission Tacos LLC"), "MISSION TACO");
+    // "SS" endings and short tokens are untouched.
+    assert_eq!(match_key("Glass Business"), "GLASS BUSINESS");
+    assert_eq!(match_key("Bus Gas"), "BUS GAS");
+    // normalize_name itself is unchanged.
+    assert_eq!(normalize_name("Super Duper Burgers"), "SUPER DUPER BURGERS");
+}
+
+#[test]
+fn name_corroboration_matches_plural_variants() {
+    let rows = vec![(
+        "health".to_string(),
+        "SUPER DUPER BURGER".to_string(),
+        "1 Elsewhere St".to_string(),
+        "2026-07-01".to_string(),
+    )];
+    let names = NameIndex::build(&rows);
+    let index = AddressIndex::build(Vec::new());
+    let mut entries = vec![name_entry("business", "Super Duper Burgers")];
+    apply_corroboration(&mut entries, &index, &names);
+    assert_eq!(entries[0].score, 3, "+1 name bonus across the plural");
 }
 
 #[test]

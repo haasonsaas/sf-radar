@@ -40,6 +40,25 @@ pub fn normalize_name(name: &str) -> String {
     tokens.join(" ")
 }
 
+/// Key for cross-source name matching: `normalize_name` plus plural folding,
+/// so "SUPER DUPER BURGERS" (business DBA) matches "SUPER DUPER BURGER"
+/// (health dba). Tokens of 4+ letters lose a trailing S unless it's "SS".
+pub fn match_key(name: &str) -> String {
+    normalize_name(name)
+        .split(' ')
+        .map(fold_plural)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn fold_plural(token: &str) -> &str {
+    if token.len() > 3 && token.ends_with('S') && !token.ends_with("SS") {
+        &token[..token.len() - 1]
+    } else {
+        token
+    }
+}
+
 /// Whether a normalized name is long enough to corroborate on.
 pub fn is_matchable(normalized: &str) -> bool {
     normalized.len() >= MIN_MATCH_LEN
