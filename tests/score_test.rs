@@ -284,7 +284,8 @@ fn entry(name: &str, hood: &str, date: &str, score: u32) -> DigestEntry {
         source: "business".to_string(),
         id: name.to_string(),
         name: name.to_string(),
-        address: "1 Market St".to_string(),
+        // Distinct address per entry: same-address entries cluster into one venue.
+        address: format!("1 {name} St"),
         date: date.to_string(),
         neighborhood: hood.to_string(),
         score,
@@ -312,12 +313,13 @@ fn digest_groups_by_bucket_then_neighborhood() {
     // within the watch bucket, Mission sorts before Sunset
     let watch_section = &text[watch..];
     assert!(watch_section.find("Mission").unwrap() < watch_section.find("Sunset").unwrap());
-    assert!(text.contains("3 new signal(s)."));
+    assert!(text.contains("3 new signal(s) at 3 venue(s)."));
 
     let md = render(&entries, 2, true, 7);
     assert!(md.contains("## 🔥 Strong signals"));
     assert!(md.contains("### Mission"));
-    assert!(md.contains("- **[business] strong-mission**"));
+    assert!(md.contains("- **strong-mission** — 1 strong-mission St — score 5 — 1 filing"));
+    assert!(md.contains("  - 2026-07-03 [business] strong-mission: test reason"));
 }
 
 #[test]
@@ -469,7 +471,7 @@ fn digest_renders_description_lines() {
     let mut e = entry("with-desc", "Mission", "2026-07-01", 4);
     e.description = Some("Tenant improvement for new cafe".to_string());
     let plain = render(&[e.clone()], 2, false, 7);
-    assert!(plain.contains("\n    Tenant improvement for new cafe\n"));
+    assert!(plain.contains("\n      Tenant improvement for new cafe\n"));
     let md = render(&[e], 2, true, 7);
-    assert!(md.contains("\n  - *Tenant improvement for new cafe*\n"));
+    assert!(md.contains("\n    - *Tenant improvement for new cafe*\n"));
 }

@@ -105,21 +105,263 @@ pub fn bucket_for(score: u32) -> Option<Bucket> {
     }
 }
 
-fn neighborhood_key(entry: &DigestEntry) -> String {
-    if entry.neighborhood.is_empty() {
+fn neighborhood_key(neighborhood: &str) -> String {
+    if neighborhood.is_empty() {
         "Unknown neighborhood".to_string()
     } else {
-        entry.neighborhood.clone()
+        neighborhood.to_string()
     }
 }
 
-fn format_entry(entry: &DigestEntry, markdown: bool) -> String {
-    let reasons = entry.reasons.join("; ");
-    let address = if entry.address.is_empty() {
-        "no address"
+/* ---------- venue clustering ---------- */
+
+/// Which source's name to show for a venue: DBAs (abc, health, business…)
+/// before synthetic names ("Permit 2026…", planning's address-as-name).
+const NAME_PRIORITY: &[&str] = &[
+    "abc",
+    "health",
+    "business",
+    "tables_chairs",
+    "entertainment",
+    "mobile_food",
+    "vending",
+    "planning",
+    "fire",
+    "permit",
+    "electrical",
+    "plumbing",
+];
+/// Earlier filings (from the full-history index) listed per venue.
+const HISTORY_CAP: usize = 5;
+
+fn source_rank(source: &str) -> usize {
+    NAME_PRIORITY
+        .iter()
+        .position(|s| *s == source)
+        .unwrap_or(NAME_PRIORITY.len())
+}
+
+struct UnionFind {
+    parent: Vec<usize>,
+}
+
+impl UnionFind {
+    fn new(n: usize) -> Self {
+        Self {
+            parent: (0..n).collect(),
+        }
+    }
+
+    fn find(&mut self, mut i: usize) -> usize {
+        while self.parent[i] != i {
+            self.parent[i] = self.parent[self.parent[i]];
+            i = self.parent[i];
+        }
+        i
+    }
+
+    fn union(&mut self, a: usize, b: usize) {
+        let (ra, rb) = (self.find(a), self.find(b));
+        if ra != rb {
+            self.parent[ra] = rb;
+        }
+    }
+}
+
+/// One venue: the digest entries at one building (or, for entries with no
+/// usable address, under one name), plus earlier filings from history.
+/// This is the unit the digest displays and marks seen.
+#[derive(Debug, Clone)]
+pub struct Venue<'a> {
+    pub name: String,
+    pub address: String,
+    pub neighborhood: String,
+    pub score: u32,  // best member score, corroboration included
+    pub date: String, // newest member date
+    pub entries: Vec<&'a DigestEntry>, // newest first
+    pub history: Vec<Corroborator>,    // earlier filings not among `entries`
+}
+
+/// Cluster entries into venues. Entries sharing a normalized address are
+/// one venue. Name links only attach an entry that has no usable address
+/// (e.g. a food-truck applicant) to one that does — two entries at
+/// different addresses stay separate venues even under the same name, so
+/// a chain's locations don't collapse into one.
+pub fn cluster<'a>(entries: &'a [DigestEntry], addresses: &AddressIndex) -> Vec<Venue<'a>> {
+    let addr_keys: Vec<String> = entries
+        .iter()
+        .map(|e| {
+            let k = address::normalize(&e.address);
+            if k.len() >= 5 { k } else { String::new() }
+        })
+        .collect();
+    let name_keys: Vec<String> = entries
+        .iter()
+        .map(|e| {
+            let k = name::match_key(&e.name);
+            if name::is_matchable(&k) { k } else { String::new() }
+        })
+        .collect();
+
+    let mut uf = UnionFind::new(entries.len());
+    let mut first_at_addr: HashMap<&str, usize> = HashMap::new();
+    for (i, k) in addr_keys.iter().enumerate() {
+        if k.is_empty() {
+            continue;
+        }
+        match first_at_addr.get(k.as_str()) {
+            Some(&j) => uf.union(i, j),
+            None => {
+                first_at_addr.insert(k, i);
+            }
+        }
+    }
+    let mut by_name: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (i, k) in name_keys.iter().enumerate() {
+        if !k.is_empty() {
+            by_name.entry(k.as_str()).or_default().push(i);
+        }
+    }
+    for idxs in by_name.values() {
+        match idxs.iter().find(|&&i| !addr_keys[i].is_empty()) {
+            Some(&anchor) => {
+                for &i in idxs {
+                    if addr_keys[i].is_empty() {
+                        uf.union(i, anchor);
+                    }
+                }
+            }
+            None => {
+                for &i in &idxs[1..] {
+                    uf.union(i, idxs[0]);
+                }
+            }
+        }
+    }
+
+    let mut groups: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for i in 0..entries.len() {
+        groups.entry(uf.find(i)).or_default().push(i);
+    }
+    groups
+        .into_values()
+        .map(|idxs| build_venue(entries, &idxs, addresses))
+        .collect()
+}
+
+fn build_venue<'a>(entries: &'a [DigestEntry], idxs: &[usize], addresses: &AddressIndex) -> Venue<'a> {
+    let mut members: Vec<&DigestEntry> = idxs.iter().map(|&i| &entries[i]).collect();
+    members.sort_by(|a, b| b.date.cmp(&a.date).then(b.score.cmp(&a.score)));
+
+    let namer = members
+        .iter()
+        .copied()
+        .filter(|e| !e.name.is_empty())
+        .min_by_key(|e| (source_rank(&e.source), std::cmp::Reverse(e.score)))
+        .unwrap_or(members[0]);
+    let address = if !namer.address.is_empty() {
+        namer.address.clone()
     } else {
-        &entry.address
+        members
+            .iter()
+            .find(|e| !e.address.is_empty())
+            .map(|e| e.address.clone())
+            .unwrap_or_default()
     };
+    let neighborhood = members
+        .iter()
+        .find(|e| !e.neighborhood.is_empty())
+        .map(|e| e.neighborhood.clone())
+        .unwrap_or_default();
+    let score = members.iter().map(|e| e.score).max().unwrap_or(0);
+    let date = members.iter().map(|e| e.date.clone()).max().unwrap_or_default();
+    let history: Vec<Corroborator> = addresses
+        .filings_at(&address)
+        .into_iter()
+        .filter(|h| {
+            !members
+                .iter()
+                .any(|m| m.source == h.source && m.name == h.name && m.date == h.date)
+        })
+        .take(HISTORY_CAP)
+        .cloned()
+        .collect();
+
+    Venue {
+        name: namer.name.clone(),
+        address,
+        neighborhood,
+        score,
+        date,
+        entries: members,
+        history,
+    }
+}
+
+/* ---------- grouping + rendering ---------- */
+
+/// Buckets of neighborhood-name → venue groups, in display order.
+type Grouped<'a> = Vec<(Bucket, Vec<(String, Vec<Venue<'a>>)>)>;
+
+/// Cluster, drop venues below `min_score`, and group for display: buckets
+/// strong-first, neighborhood groups ordered by their best venue (score
+/// desc, date desc), venues within a neighborhood the same way.
+fn grouped<'a>(entries: &'a [DigestEntry], min_score: u32, addresses: &AddressIndex) -> Grouped<'a> {
+    let by_score = |a: &Venue, b: &Venue| b.score.cmp(&a.score).then(b.date.cmp(&a.date));
+
+    let venues = cluster(entries, addresses);
+    let mut out = Vec::new();
+    for bucket in [Bucket::Strong, Bucket::Watch] {
+        let mut by_hood: BTreeMap<String, Vec<Venue<'a>>> = BTreeMap::new();
+        for venue in venues
+            .iter()
+            .filter(|v| v.score >= min_score && bucket_for(v.score) == Some(bucket))
+        {
+            by_hood
+                .entry(neighborhood_key(&venue.neighborhood))
+                .or_default()
+                .push(venue.clone());
+        }
+        if by_hood.is_empty() {
+            continue;
+        }
+        let mut groups: Vec<(String, Vec<Venue<'a>>)> = by_hood.into_iter().collect();
+        for group in groups.iter_mut().map(|(_, g)| g) {
+            group.sort_by(by_score);
+        }
+        groups.sort_by(|a, b| by_score(&a.1[0], &b.1[0]).then_with(|| a.0.cmp(&b.0)));
+        out.push((bucket, groups));
+    }
+    out
+}
+
+/// Every entry the digest shows, flattened in display order: venue by venue,
+/// each venue's filings newest first. Every filing of a displayed venue is
+/// included, even ones below `min_score` on their own — that's what gets
+/// marked seen.
+pub fn ordered_with<'a>(entries: &'a [DigestEntry], min_score: u32, addresses: &AddressIndex) -> Vec<&'a DigestEntry> {
+    grouped(entries, min_score, addresses)
+        .into_iter()
+        .flat_map(|(_, groups)| groups.into_iter().flat_map(|(_, venues)| venues))
+        .flat_map(|v| v.entries)
+        .collect()
+}
+
+/// `ordered_with` without history (venues cluster within `entries` only).
+pub fn ordered(entries: &[DigestEntry], min_score: u32) -> Vec<&DigestEntry> {
+    ordered_with(entries, min_score, &AddressIndex::build(Vec::new()))
+}
+
+fn format_filing(entry: &DigestEntry, venue: &Venue, markdown: bool) -> String {
+    // Corroboration reasons restate filings the venue block already shows
+    // (as members or on the `earlier:` line); they stay in the JSON output.
+    let reasons = entry
+        .reasons
+        .iter()
+        .filter(|r| !r.starts_with("corroborated by ") && !r.starts_with("name also in "))
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("; ");
     let desc = entry.description.as_deref().unwrap_or("");
     let mut out = if markdown {
         let name = if entry.url.is_empty() {
@@ -127,77 +369,52 @@ fn format_entry(entry: &DigestEntry, markdown: bool) -> String {
         } else {
             format!("[{}]({})", entry.name, entry.url)
         };
-        format!(
-            "- **[{}] {}** — {} — {} — score {}\n  - {}",
-            entry.source, name, address, entry.date, entry.score, reasons
-        )
+        format!("  - {} [{}] {}: {}", entry.date, entry.source, name, reasons)
     } else {
-        format!(
-            "  [{}] {} — {}\n    {} · score {} · {}",
-            entry.source, entry.name, address, entry.date, entry.score, reasons
-        )
+        // Skip the name when it's just the venue name again.
+        let name = if entry.name == venue.name { String::new() } else { format!("{} — ", entry.name) };
+        format!("    {} [{}] {}{}", entry.date, entry.source, name, reasons)
     };
     if !desc.is_empty() {
         if markdown {
-            out.push_str(&format!("\n  - *{desc}*"));
+            out.push_str(&format!("\n    - *{desc}*"));
         } else {
-            out.push_str(&format!("\n    {desc}"));
+            out.push_str(&format!("\n      {desc}"));
         }
     }
     if !markdown && !entry.url.is_empty() {
-        out.push_str(&format!("\n    {}", entry.url));
+        out.push_str(&format!("\n      {}", entry.url));
     }
     out
 }
 
-/// Buckets of neighborhood-name → entries groups, in display order.
-type Grouped<'a> = Vec<(Bucket, Vec<(String, Vec<&'a DigestEntry>)>)>;
-
-/// Group entries for display: buckets strong-first, neighborhood groups
-/// ordered by their best entry (score desc, date desc), and entries within a
-/// neighborhood the same way, so the strongest signals float to the top.
-/// Entries below `min_score` are filtered out.
-fn grouped(entries: &[DigestEntry], min_score: u32) -> Grouped<'_> {
-    let by_score = |a: &&DigestEntry, b: &&DigestEntry| {
-        b.score.cmp(&a.score).then(b.date.cmp(&a.date))
+fn format_venue(venue: &Venue, markdown: bool) -> String {
+    let address = if venue.address.is_empty() { "no address" } else { &venue.address };
+    let n = venue.entries.len();
+    let filings = format!("{n} filing{}", if n == 1 { "" } else { "s" });
+    let mut out = if markdown {
+        format!("- **{}** — {} — score {} — {}", venue.name, address, venue.score, filings)
+    } else {
+        format!("  {} — {} · score {} · {}", venue.name, address, venue.score, filings)
     };
-
-    let mut out = Vec::new();
-    for bucket in [Bucket::Strong, Bucket::Watch] {
-        let mut by_hood: BTreeMap<String, Vec<&DigestEntry>> = BTreeMap::new();
-        for entry in entries
-            .iter()
-            .filter(|e| e.score >= min_score && bucket_for(e.score) == Some(bucket))
-        {
-            by_hood.entry(neighborhood_key(entry)).or_default().push(entry);
+    for entry in &venue.entries {
+        out.push('\n');
+        out.push_str(&format_filing(entry, venue, markdown));
+    }
+    if !venue.history.is_empty() {
+        let earlier = list(&venue.history.iter().collect::<Vec<_>>());
+        if markdown {
+            out.push_str(&format!("\n  - earlier: {earlier}"));
+        } else {
+            out.push_str(&format!("\n    earlier: {earlier}"));
         }
-        if by_hood.is_empty() {
-            continue;
-        }
-
-        let mut groups: Vec<(String, Vec<&DigestEntry>)> = by_hood.into_iter().collect();
-        for group in groups.iter_mut().map(|(_, g)| g) {
-            group.sort_by(by_score);
-        }
-        groups.sort_by(|a, b| {
-            by_score(&a.1[0], &b.1[0]).then_with(|| a.0.cmp(&b.0))
-        });
-        out.push((bucket, groups));
     }
     out
 }
 
-/// Entries flattened in display order (best first) — the same order `render`
-/// prints them and `render_json` emits them.
-pub fn ordered(entries: &[DigestEntry], min_score: u32) -> Vec<&DigestEntry> {
-    grouped(entries, min_score)
-        .into_iter()
-        .flat_map(|(_, groups)| groups.into_iter().flat_map(|(_, group)| group))
-        .collect()
-}
-
-/// Render the digest: buckets ordered strong-first (see `grouped`).
-pub fn render(entries: &[DigestEntry], min_score: u32, markdown: bool, days: u32) -> String {
+/// Render the digest: buckets ordered strong-first, one block per venue
+/// with its filings as a timeline (see `grouped`).
+pub fn render_with(entries: &[DigestEntry], min_score: u32, markdown: bool, days: u32, addresses: &AddressIndex) -> String {
     let mut out = String::new();
     let header = format!("SF Opening Radar — last {days} days");
     if markdown {
@@ -206,8 +423,9 @@ pub fn render(entries: &[DigestEntry], min_score: u32, markdown: bool, days: u32
         out.push_str(&format!("{header}\n"));
     }
 
-    let mut total = 0usize;
-    for (bucket, groups) in grouped(entries, min_score) {
+    let mut signals = 0usize;
+    let mut venues = 0usize;
+    for (bucket, groups) in grouped(entries, min_score, addresses) {
         out.push('\n');
         if markdown {
             out.push_str(&format!("## {}\n", bucket.title()));
@@ -216,31 +434,37 @@ pub fn render(entries: &[DigestEntry], min_score: u32, markdown: bool, days: u32
         }
 
         for (hood, group) in groups {
-            total += group.len();
             out.push('\n');
             if markdown {
                 out.push_str(&format!("### {hood}\n\n"));
             } else {
                 out.push_str(&format!("{hood}\n"));
             }
-            for entry in group {
-                out.push_str(&format_entry(entry, markdown));
+            for venue in group {
+                venues += 1;
+                signals += venue.entries.len();
+                out.push_str(&format_venue(&venue, markdown));
                 out.push('\n');
             }
         }
     }
 
-    if total == 0 {
+    if signals == 0 {
         out.push_str("\nNo new signals.\n");
     } else {
-        out.push_str(&format!("\n{total} new signal(s).\n"));
+        out.push_str(&format!("\n{signals} new signal(s) at {venues} venue(s).\n"));
     }
     out
 }
 
+/// `render_with` without history.
+pub fn render(entries: &[DigestEntry], min_score: u32, markdown: bool, days: u32) -> String {
+    render_with(entries, min_score, markdown, days, &AddressIndex::build(Vec::new()))
+}
+
 /// Machine-readable form of one digest entry. Field set and order are part
 /// of the tool's JSON contract — a sibling project implements the same shape.
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct JsonEntry {
     pub source: String,
     pub id: String,
@@ -255,6 +479,27 @@ pub struct JsonEntry {
     pub description: String,
 }
 
+/// An earlier filing at a venue's address, from history.
+#[derive(Debug, serde::Serialize)]
+pub struct JsonFiling {
+    pub source: String,
+    pub name: String,
+    pub date: String,
+}
+
+/// One venue in `--json`: the clustered view of `entries`.
+#[derive(Debug, serde::Serialize)]
+pub struct JsonVenue {
+    pub name: String,
+    pub address: String,
+    pub neighborhood: String,
+    pub date: String,
+    pub score: u32,
+    pub bucket: String,
+    pub filings: Vec<JsonEntry>,
+    pub history: Vec<JsonFiling>,
+}
+
 /// Top-level `--json` output (see `render_json`).
 #[derive(Debug, serde::Serialize)]
 pub struct JsonDigest {
@@ -264,38 +509,69 @@ pub struct JsonDigest {
     pub min_score: u32,
     pub archived: usize,
     pub entries: Vec<JsonEntry>,
+    pub venues: Vec<JsonVenue>,
 }
 
-/// Machine-readable digest, same entry order as the prose digest (best
-/// first). Buckets use the post-corroboration score. `url` is the per-row
-/// page where the source has one (see `url_for`), else ""; `description`
-/// is the permit snippet or "".
-pub fn render_json(entries: &[DigestEntry], min_score: u32, days: u32, archived: usize) -> String {
-    let entries = ordered(entries, min_score)
+fn json_entry(e: &DigestEntry) -> JsonEntry {
+    JsonEntry {
+        source: e.source.clone(),
+        id: e.id.clone(),
+        name: e.name.clone(),
+        address: e.address.clone(),
+        neighborhood: e.neighborhood.clone(),
+        date: e.date.clone(),
+        score: e.score,
+        bucket: bucket_for(e.score).map_or("watch", Bucket::as_str).to_string(),
+        reasons: e.reasons.clone(),
+        url: e.url.clone(),
+        description: e.description.clone().unwrap_or_default(),
+    }
+}
+
+/// Machine-readable digest. `entries` is every displayed filing in display
+/// order (venue by venue), the same flat shape as before venues existed;
+/// `venues` is the clustered view. Buckets use the post-corroboration
+/// score. `url` is the per-row page where the source has one (see
+/// `url_for`), else ""; `description` is the permit snippet or "".
+pub fn render_json_with(entries: &[DigestEntry], min_score: u32, days: u32, archived: usize, addresses: &AddressIndex) -> String {
+    let venues: Vec<JsonVenue> = grouped(entries, min_score, addresses)
         .into_iter()
-        .map(|e| JsonEntry {
-            source: e.source.clone(),
-            id: e.id.clone(),
-            name: e.name.clone(),
-            address: e.address.clone(),
-            neighborhood: e.neighborhood.clone(),
-            date: e.date.clone(),
-            score: e.score,
-            bucket: bucket_for(e.score).map_or("watch", Bucket::as_str).to_string(),
-            reasons: e.reasons.clone(),
-            url: e.url.clone(),
-            description: e.description.clone().unwrap_or_default(),
+        .flat_map(|(_, groups)| groups.into_iter().flat_map(|(_, venues)| venues))
+        .map(|v| JsonVenue {
+            name: v.name.clone(),
+            address: v.address.clone(),
+            neighborhood: v.neighborhood.clone(),
+            date: v.date.clone(),
+            score: v.score,
+            bucket: bucket_for(v.score).map_or("watch", Bucket::as_str).to_string(),
+            filings: v.entries.iter().map(|e| json_entry(e)).collect(),
+            history: v
+                .history
+                .iter()
+                .map(|h| JsonFiling {
+                    source: h.source.clone(),
+                    name: h.name.clone(),
+                    date: h.date.clone(),
+                })
+                .collect(),
         })
         .collect();
+    let flat: Vec<JsonEntry> = venues.iter().flat_map(|v| v.filings.iter().cloned()).collect();
     let digest = JsonDigest {
         tool: "sf-radar".to_string(),
         generated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         window_days: days,
         min_score,
         archived,
-        entries,
+        entries: flat,
+        venues,
     };
     serde_json::to_string_pretty(&digest).expect("JsonDigest serialization cannot fail")
+}
+
+/// `render_json_with` without history.
+pub fn render_json(entries: &[DigestEntry], min_score: u32, days: u32, archived: usize) -> String {
+    render_json_with(entries, min_score, days, archived, &AddressIndex::build(Vec::new()))
 }
 
 #[derive(Debug, Clone)]
@@ -354,6 +630,12 @@ impl AddressIndex {
     /// Up to 3 corroborators from OTHER sources at the same address.
     pub fn corroborators(&self, source: &str, addr: &str) -> Vec<&Corroborator> {
         corroborators(self.by_address.get(&address::normalize(addr)), source, 3)
+    }
+
+    /// Every filing at the same address, any source, newest first (deduped,
+    /// capped) — the venue timeline's history.
+    pub fn filings_at(&self, addr: &str) -> Vec<&Corroborator> {
+        corroborators(self.by_address.get(&address::normalize(addr)), "", 10)
     }
 }
 

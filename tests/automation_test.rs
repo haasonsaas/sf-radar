@@ -10,7 +10,8 @@ fn entry(source: &str, id: &str, score: u32) -> DigestEntry {
         source: source.to_string(),
         id: id.to_string(),
         name: format!("Name {id}"),
-        address: "1 Main St".to_string(),
+        // Distinct address per entry: same-address entries cluster into one venue.
+        address: format!("1 {id} St"),
         date: "2026-07-01".to_string(),
         neighborhood: "Mission".to_string(),
         score,
@@ -36,7 +37,7 @@ fn json_shape_has_exact_keys() {
         top,
         // serde_json::Value sorts object keys; the emitted field order is
         // covered by the exact-match entry assertions below.
-        ["archived", "entries", "generated_at", "min_score", "tool", "window_days"]
+        ["archived", "entries", "generated_at", "min_score", "tool", "venues", "window_days"]
     );
     assert_eq!(v["tool"], "sf-radar");
     assert_eq!(v["window_days"], 30);
@@ -80,7 +81,7 @@ fn json_and_prose_include_entry_url() {
     );
 
     let plain = digest::render(&[e.clone()], 2, false, 7);
-    assert!(plain.contains("\n    https://www.abc.ca.gov/"), "plain text lists the url on its own line");
+    assert!(plain.contains("\n      https://www.abc.ca.gov/"), "plain text lists the url on its own line");
     let md = digest::render(&[e], 2, true, 7);
     assert!(md.contains("[Name 681355](https://www.abc.ca.gov/"), "markdown links the name");
 }
@@ -91,7 +92,7 @@ fn json_bucket_uses_post_bonus_score() {
     let rows = vec![(
         "permit".to_string(),
         "Permit 1".to_string(),
-        "1 Main St".to_string(),
+        "1 B1 St".to_string(),
         "2026-06-15".to_string(),
     )];
     let names = NameIndex::build(&rows);
