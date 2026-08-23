@@ -1,5 +1,5 @@
 use chrono::NaiveDate;
-use sf_radar::abc::{dates_to_fetch, extract_nonce, parse_report, score_license_type};
+use sf_radar::abc::{dates_to_fetch, extract_nonce, parse_report, score_issued_license_type, score_license_type};
 
 /// Two rows in the real report layout: an SF type-47 application with a DBA,
 /// and an out-of-county row that must be filtered.
@@ -59,6 +59,7 @@ fn parses_sf_rows_and_filters_other_counties() {
     assert_eq!(a.license_number, "681355");
     assert_eq!(a.status, "PEND");
     assert_eq!(a.license_type, 47);
+    assert_eq!(a.action, "PER/PRM");
     assert_eq!(a.dba, "ALTO 88");
     assert_eq!(a.owner, "PLEASE SPEAR, LLC");
     assert_eq!(a.street, "88 SPEAR ST.");
@@ -81,34 +82,33 @@ fn owner_without_dba_line() {
 #[test]
 fn license_type_scoring() {
     for t in [41, 47, 75] {
-        let (score, reasons) = score_license_type(t);
+        let (score, reasons) = score_license_type(t, "ORI");
         assert_eq!(score, 3, "type {t} is a restaurant license");
         assert!(reasons[0].contains("restaurant"));
     }
     for t in [40, 42, 48, 61] {
-        let (score, reasons) = score_license_type(t);
+        let (score, reasons) = score_license_type(t, "ORI");
         assert_eq!(score, 3, "type {t} is a bar license");
         assert!(reasons[0].contains("bar"));
     }
     for t in [20, 21] {
-        assert_eq!(score_license_type(t).0, 2, "type {t} is off-sale");
+        assert_eq!(score_license_type(t, "ORI").0, 2, "type {t} is off-sale");
     }
     // Wholesale/importer/caterer types are dropped.
     for t in [9, 14, 17, 58, 77] {
-        assert_eq!(score_license_type(t).0, 0, "type {t} should not score");
+        assert_eq!(score_license_type(t, "ORI").0, 0, "type {t} should not score");
     }
 }
 
 #[test]
 fn issued_license_scores_one_above_application() {
-    use sf_radar::abc::score_issued_license_type;
     for t in [41, 47, 75, 40, 42, 48, 61] {
-        let (score, reasons) = score_issued_license_type(t);
+        let (score, reasons) = score_issued_license_type(t, "ORI");
         assert_eq!(score, 4, "type {t} issued is a strong signal");
         assert!(reasons[0].starts_with("liquor license issued:"), "{reasons:?}");
     }
-    assert_eq!(score_issued_license_type(20).0, 3);
-    assert_eq!(score_issued_license_type(58).0, 0, "non-venue types still dropped");
+    assert_eq!(score_issued_license_type(20, "ORI").0, 3);
+    assert_eq!(score_issued_license_type(58, "ORI").0, 0, "non-venue types still dropped");
 }
 
 #[test]
@@ -142,4 +142,26 @@ fn date_window_logic() {
     // Explicit --since wins over the watermark.
     let dates = dates_to_fetch(Some("2026-08-01"), Some("2026-08-20"), end);
     assert_eq!(dates.len(), 3);
+}
+
+#[test]
+fn action_codes_adjust_scores() {
+    // Original license and premises transfers are new venues: full score.
+    assert_eq!(score_license_type(47, "ORI").0, 3);
+    assert_eq!(score_license_type(47, "PER/PRM").0, 3);
+    assert_eq!(score_license_type(47, "PRM").0, 3);
+    assert!(score_license_type(47, "ORI").1[0].ends_with("(restaurant), new license"));
+    assert!(score_license_type(47, "PER/PRM").1[0].ends_with("premises transfer"));
+
+    // Person-to-person transfer at the same premises: ownership change, -1.
+    let (score, reasons) = score_license_type(47, "PER");
+    assert_eq!(score, 2);
+    assert!(reasons[0].contains("ownership transfer at existing premises"));
+    assert_eq!(score_issued_license_type(48, "PER").0, 3);
+    assert_eq!(score_license_type(20, "PER").0, 1, "off-sale transfer drops below storage");
+
+    // Unknown/empty action: no adjustment, no note.
+    let (score, reasons) = score_license_type(41, "");
+    assert_eq!(score, 3);
+    assert!(reasons[0].ends_with("(restaurant)"));
 }
