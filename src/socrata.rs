@@ -3,6 +3,9 @@ use serde_json::Value;
 use thiserror::Error;
 
 const PAGE_SIZE: usize = 5000;
+/// Attempts per page for rate-limit (429) and server (5xx) errors, with
+/// exponential backoff: 1s, 2s between tries.
+const MAX_ATTEMPTS: u32 = 3;
 
 #[derive(Debug, Error)]
 pub enum SocrataError {
@@ -67,22 +70,7 @@ impl SocrataClient {
             if let Some(w) = &where_clause {
                 query.push(("$where", w.clone()));
             }
-            let mut req = self.client.get(&url).query(&query);
-            if let Some(token) = &self.app_token {
-                req = req.header("X-App-Token", token);
-            }
-
-            let resp = req.send()?;
-            let status = resp.status();
-            let text = resp.text()?;
-            if !status.is_success() {
-                return Err(SocrataError::Api {
-                    status: status.as_u16(),
-                    message: text.chars().take(300).collect(),
-                }
-                .into());
-            }
-
+            let text = self.get_page(&url, &query)?;
             let body: Value = serde_json::from_str(&text)?;
             let page = body
                 .as_array()
@@ -96,5 +84,47 @@ impl SocrataClient {
         }
 
         Ok(all)
+    }
+
+    /// GET one page, retrying 429s and 5xxs (transient rate limits / blips)
+    /// with exponential backoff. Other errors fail immediately.
+    fn get_page(&self, url: &str, query: &[(&str, String)]) -> Result<String> {
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            let mut req = self.client.get(url).query(query);
+            if let Some(token) = &self.app_token {
+                req = req.header("X-App-Token", token);
+            }
+
+            let outcome = match req.send() {
+                Ok(resp) => {
+                    let status = resp.status();
+                    let text = resp.text()?;
+                    if status.is_success() {
+                        return Ok(text);
+                    }
+                    let retryable = status.as_u16() == 429 || status.is_server_error();
+                    (
+                        retryable,
+                        SocrataError::Api {
+                            status: status.as_u16(),
+                            message: text.chars().take(300).collect(),
+                        }
+                        .into(),
+                    )
+                }
+                // Connection-level failures (reset, timeout) are worth a retry.
+                Err(e) => (true, e.into()),
+            };
+
+            let (retryable, err): (bool, anyhow::Error) = outcome;
+            if !retryable || attempt >= MAX_ATTEMPTS {
+                return Err(err);
+            }
+            let wait = std::time::Duration::from_secs(1 << (attempt - 1));
+            eprintln!("  retrying in {}s: {err}", wait.as_secs());
+            std::thread::sleep(wait);
+        }
     }
 }

@@ -2,7 +2,7 @@ use serde_json::json;
 use sf_radar::digest::{bucket_for, render, Bucket, DigestEntry};
 use sf_radar::score::{
     score_business, score_electrical, score_entertainment, score_mobile_food, score_permit,
-    score_plumbing,
+    score_plumbing, score_tables_chairs,
 };
 
 #[test]
@@ -119,6 +119,94 @@ fn permit_estimated_cost_threshold() {
         "estimated_cost": "100000.01",
     });
     assert_eq!(score_permit(&row).0, 1);
+}
+
+#[test]
+fn business_beverage_naics_scores_two() {
+    // 3121 = beverage manufacturing (breweries, wineries, distilleries).
+    let row = json!({
+        "dba_name": "",
+        "ownership_name": "",
+        "lic_code_description": "General",
+        "self_reported_naics_code": "312120",
+    });
+    let (score, reasons) = score_business(&row);
+    assert_eq!(score, 2);
+    assert!(reasons.iter().any(|r| r.contains("beverage producer")));
+}
+
+#[test]
+fn permit_bar_excludes_residential_compounds() {
+    // Substring matches that used to fire: rebar, grab bar, wet bar.
+    for desc in [
+        "install rebar reinforcement at foundation",
+        "install grab bar in bathroom",
+        "add wet bar to living room",
+    ] {
+        let row = json!({"description": desc, "proposed_use": "", "estimated_cost": ""});
+        assert_eq!(score_permit(&row).0, 0, "{desc:?} should not score");
+    }
+
+    // Real bars still hit.
+    let row = json!({"description": "buildout for wine bar", "proposed_use": "", "estimated_cost": ""});
+    let (score, reasons) = score_permit(&row);
+    assert_eq!(score, 2);
+    assert!(reasons.iter().any(|r| r.contains("bar")));
+}
+
+#[test]
+fn permit_expanded_food_keywords() {
+    for desc in [
+        "taqueria tenant buildout",
+        "convert space to pizzeria",
+        "new ramen shop interior",
+        "brewery taproom fit-out",
+    ] {
+        let row = json!({"description": desc, "proposed_use": "", "estimated_cost": ""});
+        assert!(score_permit(&row).0 >= 2, "{desc:?} should score");
+    }
+}
+
+#[test]
+fn permit_new_requires_word_boundary() {
+    // "newly renovated" is not a new business.
+    let row = json!({"description": "newly renovated office suite", "proposed_use": "", "estimated_cost": ""});
+    assert_eq!(score_permit(&row).0, 0);
+
+    let row = json!({"description": "new storefront for retail", "proposed_use": "", "estimated_cost": ""});
+    let (score, reasons) = score_permit(&row);
+    assert_eq!(score, 3); // keyword +2, leading "new" +1
+    assert!(reasons.iter().any(|r| r.contains("new business")));
+}
+
+#[test]
+fn trade_commercial_kitchen_equipment_keywords() {
+    let row = json!({"description": "install walk-in cooler and compressor", "permit_valuation": ""});
+    assert_eq!(score_electrical(&row).0, 2);
+
+    let row = json!({"description": "type 1 hood exhaust connection", "valuation": ""});
+    assert_eq!(score_plumbing(&row).0, 2);
+
+    // "walk-in closet" must not score.
+    let row = json!({"description": "wiring for walk-in closet", "permit_valuation": ""});
+    assert_eq!(score_electrical(&row).0, 0);
+}
+
+#[test]
+fn tables_chairs_scoring() {
+    let row = json!({"dbaname": "CAFE X", "tablesandchairs": true, "displaymerchandise": false});
+    let (score, reasons) = score_tables_chairs(&row);
+    assert_eq!(score, 3);
+    assert!(reasons.iter().any(|r| r.contains("outdoor seating")));
+
+    let row = json!({"dbaname": "SHOP Y", "tablesandchairs": false, "displaymerchandise": true});
+    let (score, reasons) = score_tables_chairs(&row);
+    assert_eq!(score, 2);
+    assert!(reasons.iter().any(|r| r.contains("merchandise display")));
+
+    // Missing flags still store as a generic registration.
+    let row = json!({"dbaname": "Z"});
+    assert_eq!(score_tables_chairs(&row).0, 2);
 }
 
 #[test]

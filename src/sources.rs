@@ -163,6 +163,26 @@ pub fn all() -> Vec<Source> {
             score: |r, _conn| score::score_mobile_food(r),
         },
         Source {
+            key: "tables_chairs",
+            dataset: "dpch-7nr4",
+            backfill_start: None,
+            quiet_backfill: false,
+            date_field: Some("submission_created"),
+            min_store_score: 0,
+            external_id: |r| f(r, "id"),
+            name: |r| {
+                let dba = field(r, "dbaname");
+                if dba.is_empty() {
+                    f(r, "businessname")
+                } else {
+                    dba.to_string()
+                }
+            },
+            address: |r| f(r, "streetaddress"),
+            neighborhood: |r| f(r, "analysis_neighborhood"),
+            score: |r, _conn| score::score_tables_chairs(r),
+        },
+        Source {
             key: "electrical",
             dataset: "ftty-kx6y",
             backfill_start: None,

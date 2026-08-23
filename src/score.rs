@@ -14,16 +14,36 @@ pub fn field_num(row: &Value, key: &str) -> Option<f64> {
     }
 }
 
+/// Building-permit description keywords (+2). "bar" is NOT in this list — as
+/// a substring it matches "rebar", "grab bar", and "wet bar"; it's handled by
+/// `has_bar_keyword` as a standalone word instead.
 const PERMIT_KEYWORDS: &[&str] = &[
     "restaurant",
     "cafe",
     "coffee",
     "bakery",
-    "bar",
     "boba",
     "tea shop",
     "ice cream",
     "gelato",
+    "taqueria",
+    "pizzeria",
+    "pizza",
+    "ramen",
+    "sushi",
+    "izakaya",
+    "poke",
+    "deli",
+    "bistro",
+    "brewery",
+    "taproom",
+    "brewpub",
+    "winery",
+    "tasting room",
+    "food hall",
+    "juice",
+    "grocery",
+    "butcher",
     "retail",
     "storefront",
     "salon",
@@ -43,11 +63,17 @@ pub fn score_business(row: &Value) -> (u32, Vec<String>) {
 
     let is_food =
         naics.starts_with("722") || FOOD_LIC_KEYWORDS.iter().any(|k| lic_upper.contains(k));
+    // 3121 = beverage manufacturing: breweries, wineries, distilleries —
+    // in SF these almost always open with a taproom or tasting room.
+    let is_beverage = naics.starts_with("3121");
     let is_retail = naics.starts_with("44") || naics.starts_with("45");
 
     if is_food {
         score += 2;
         reasons.push(format!("food service (lic: {lic}, NAICS: {naics})"));
+    } else if is_beverage {
+        score += 2;
+        reasons.push(format!("beverage producer (NAICS: {naics})"));
     } else if is_retail {
         score += 2;
         reasons.push(format!("retail (NAICS: {naics})"));
@@ -70,11 +96,14 @@ pub fn score_permit(row: &Value) -> (u32, Vec<String>) {
 
     let desc = field(row, "description").to_lowercase();
 
-    let hits: Vec<&str> = PERMIT_KEYWORDS
+    let mut hits: Vec<&str> = PERMIT_KEYWORDS
         .iter()
         .copied()
         .filter(|k| desc.contains(k))
         .collect();
+    if has_bar_keyword(&desc) {
+        hits.push("bar");
+    }
     if !hits.is_empty() {
         score += 2;
         reasons.push(format!("keyword: {}", hits.join(", ")));
@@ -88,7 +117,8 @@ pub fn score_permit(row: &Value) -> (u32, Vec<String>) {
         score += 1;
         reasons.push("tenant improvement".to_string());
     }
-    if desc.starts_with("new") || desc.contains("new business") {
+    // Word-boundary "new": "new restaurant..." yes, "newly renovated..." no.
+    if desc.split_whitespace().next() == Some("new") || desc.contains("new business") {
         score += 1;
         reasons.push("new business".to_string());
     }
@@ -124,6 +154,26 @@ pub fn score_entertainment(row: &Value) -> (u32, Vec<String>) {
     (score, reasons)
 }
 
+/// Score a Shared Spaces sidewalk registration (tables & chairs / display
+/// merchandise). Sidewalk seating is a food-service tell; a merchandise
+/// display is retail. Booleans arrive as real JSON booleans, not strings.
+pub fn score_tables_chairs(row: &Value) -> (u32, Vec<String>) {
+    let flag = |key: &str| row.get(key).and_then(Value::as_bool).unwrap_or(false);
+    if flag("tablesandchairs") {
+        (
+            3,
+            vec!["sidewalk tables & chairs registration — outdoor seating".to_string()],
+        )
+    } else if flag("displaymerchandise") {
+        (
+            2,
+            vec!["sidewalk merchandise display registration".to_string()],
+        )
+    } else {
+        (2, vec!["Shared Spaces sidewalk registration".to_string()])
+    }
+}
+
 /// Score a Mobile Food Facility permit row.
 pub fn score_mobile_food(row: &Value) -> (u32, Vec<String>) {
     let mut score = 2;
@@ -146,6 +196,15 @@ const TRADE_STRONG_KEYWORDS: &[&str] = &[
     "cafeteria",
     "bakery",
     "commercial kitchen",
+    "espresso",
+    "brewery",
+    "taproom",
+    "pizza oven",
+    // Commercial cold storage / hood tells. "walk-in" alone would match
+    // "walk-in closet"; "hood" alone matches residential range hoods.
+    "walk-in cooler",
+    "walk-in freezer",
+    "type 1 hood",
 ];
 
 /// Plumbing adds "grease" — a grease trap/interceptor is a restaurant tell.
@@ -156,6 +215,13 @@ const PLUMBING_STRONG_KEYWORDS: &[&str] = &[
     "cafeteria",
     "bakery",
     "commercial kitchen",
+    "espresso",
+    "brewery",
+    "taproom",
+    "pizza oven",
+    "walk-in cooler",
+    "walk-in freezer",
+    "type 1 hood",
     "grease",
 ];
 
