@@ -100,6 +100,18 @@ fn license_type_scoring() {
 }
 
 #[test]
+fn issued_license_scores_one_above_application() {
+    use sf_radar::abc::score_issued_license_type;
+    for t in [41, 47, 75, 40, 42, 48, 61] {
+        let (score, reasons) = score_issued_license_type(t);
+        assert_eq!(score, 4, "type {t} issued is a strong signal");
+        assert!(reasons[0].starts_with("liquor license issued:"), "{reasons:?}");
+    }
+    assert_eq!(score_issued_license_type(20).0, 3);
+    assert_eq!(score_issued_license_type(58).0, 0, "non-venue types still dropped");
+}
+
+#[test]
 fn nonce_extraction() {
     let page = r#"<input type="hidden" id="abclqs_daily_report" name="abclqs_daily_report" value="ea2a54ebea" />"#;
     assert_eq!(extract_nonce(page).as_deref(), Some("ea2a54ebea"));

@@ -40,29 +40,69 @@ impl AbcApplication {
     }
 }
 
+/// Which daily report to pull. The values are the form's `rpttype`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReportKind {
+    /// "Report of Issued Licenses": a license became active — the venue is
+    /// opening (or, for transfers, changing hands).
+    IssuedLicenses = 1,
+    /// "Report of New Applications": the earliest ABC signal.
+    NewApplications = 2,
+}
+
+impl ReportKind {
+    fn rpttype(self) -> &'static str {
+        match self {
+            ReportKind::IssuedLicenses => "1",
+            ReportKind::NewApplications => "2",
+        }
+    }
+
+    fn referer(self) -> &'static str {
+        match self {
+            ReportKind::IssuedLicenses => "/licensing/licensing-reports/issued-licenses/",
+            ReportKind::NewApplications => "/licensing/licensing-reports/new-applications/",
+        }
+    }
+}
+
+/// What a license type means for the radar, if anything.
+fn license_class(license_type: u32) -> Option<(&'static str, u32)> {
+    match license_type {
+        // 41 = on-sale beer & wine eating place, 47 = on-sale general eating
+        // place, 75 = brewpub-restaurant.
+        41 | 47 | 75 => Some(("restaurant", 3)),
+        // 40/61 = on-sale beer, 42 = on-sale beer & wine public premises,
+        // 48 = on-sale general public premises (bar/nightclub).
+        40 | 42 | 48 | 61 => Some(("bar", 3)),
+        // 20 = off-sale beer & wine, 21 = off-sale general (shops).
+        20 | 21 => Some(("off-sale shop", 2)),
+        _ => None,
+    }
+}
+
 /// Score an application by license type. On-sale eating places and bars are
 /// strong signals; off-sale (shops) are moderate; everything else (wholesale,
 /// importers, caterers, events) is dropped.
 pub fn score_license_type(license_type: u32) -> (u32, Vec<String>) {
-    match license_type {
-        // 41 = on-sale beer & wine eating place, 47 = on-sale general eating
-        // place, 75 = brewpub-restaurant.
-        41 | 47 | 75 => (
-            3,
-            vec![format!("liquor license application: type {license_type} (restaurant)")],
+    match license_class(license_type) {
+        Some((class, score)) => (
+            score,
+            vec![format!("liquor license application: type {license_type} ({class})")],
         ),
-        // 40/61 = on-sale beer, 42 = on-sale beer & wine public premises,
-        // 48 = on-sale general public premises (bar/nightclub).
-        40 | 42 | 48 | 61 => (
-            3,
-            vec![format!("liquor license application: type {license_type} (bar)")],
+        None => (0, Vec::new()),
+    }
+}
+
+/// Score an issued license: one point above the application for the same
+/// type — the venue is now licensed to pour, so opening is imminent.
+pub fn score_issued_license_type(license_type: u32) -> (u32, Vec<String>) {
+    match license_class(license_type) {
+        Some((class, score)) => (
+            score + 1,
+            vec![format!("liquor license issued: type {license_type} ({class})")],
         ),
-        // 20 = off-sale beer & wine, 21 = off-sale general (shops).
-        20 | 21 => (
-            2,
-            vec![format!("liquor license application: type {license_type} (off-sale shop)")],
-        ),
-        _ => (0, Vec::new()),
+        None => (0, Vec::new()),
     }
 }
 
@@ -207,23 +247,31 @@ impl AbcClient {
         Ok(Self { client, nonce })
     }
 
-    /// Fetch and parse the new-applications report for one date.
-    pub fn new_applications(&self, date: NaiveDate) -> Result<Vec<AbcApplication>> {
+    /// Fetch and parse one daily report (both kinds share the table layout).
+    pub fn report(&self, kind: ReportKind, date: NaiveDate) -> Result<Vec<AbcApplication>> {
         let resp = self
             .client
             .post(REPORT_POST)
             .form(&[
                 ("action", "abclqs_daily_report"),
-                ("url", "/licensing/licensing-reports/new-applications/"),
-                ("rpttype", "2"),
+                ("url", kind.referer()),
+                ("rpttype", kind.rpttype()),
                 ("abclqs_daily_report", &self.nonce),
-                ("_wp_http_referer", "/licensing/licensing-reports/new-applications/"),
+                ("_wp_http_referer", kind.referer()),
                 ("abclqs-date", &date.format("%m/%d/%Y").to_string()),
             ])
             .send()?
             .error_for_status()
-            .with_context(|| format!("abc report for {date}"))?;
+            .with_context(|| format!("abc {kind:?} report for {date}"))?;
         Ok(parse_report(&resp.text()?))
+    }
+
+    pub fn new_applications(&self, date: NaiveDate) -> Result<Vec<AbcApplication>> {
+        self.report(ReportKind::NewApplications, date)
+    }
+
+    pub fn issued_licenses(&self, date: NaiveDate) -> Result<Vec<AbcApplication>> {
+        self.report(ReportKind::IssuedLicenses, date)
     }
 }
 
