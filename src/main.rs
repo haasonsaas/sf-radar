@@ -128,7 +128,7 @@ fn fetch(db_path: &std::path::Path, since: Option<String>, full: bool) -> Result
     }
 
     // ABC liquor licenses come from a scraped HTML report, not Socrata.
-    match fetch_abc(&conn, since.as_deref(), &today) {
+    match fetch_abc(&conn, since.as_deref(), full, &today) {
         Ok(stored) => total += stored,
         Err(e) => {
             eprintln!("  abc failed, skipping: {e:#}");
@@ -260,8 +260,9 @@ fn fetch_source(
 /// Fetch ABC liquor-license applications (scraped daily reports). One HTTP
 /// request per report day since the watermark; SF rows scoring >= 2 are
 /// stored under source "abc".
-fn fetch_abc(conn: &rusqlite::Connection, since: Option<&str>, today: &str) -> Result<usize> {
-    let watermark = db::get_watermark(conn, "watermark:abc")?;
+fn fetch_abc(conn: &rusqlite::Connection, since: Option<&str>, full: bool, today: &str) -> Result<usize> {
+    // --full ignores the watermark and re-pulls the backfill window.
+    let watermark = if full { None } else { db::get_watermark(conn, "watermark:abc")? };
     let dates = abc::dates_to_fetch(watermark.as_deref(), since, abc::newest_report_day());
     if dates.is_empty() {
         println!("Fetching abc (liquor licenses): up to date");
@@ -280,13 +281,13 @@ fn fetch_abc(conn: &rusqlite::Connection, since: Option<&str>, today: &str) -> R
     // stored as its own signal ("<license>-issued") so the venue timeline
     // shows both lifecycle events.
     let reports = [
-        (abc::ReportKind::NewApplications, "", abc::score_license_type as fn(u32) -> (u32, Vec<String>)),
-        (abc::ReportKind::IssuedLicenses, "-issued", abc::score_issued_license_type),
+        (abc::ReportKind::NewApplications, "", abc::score_application as fn(&abc::AbcApplication) -> (u32, Vec<String>)),
+        (abc::ReportKind::IssuedLicenses, "-issued", abc::score_issued),
     ];
     for date in &dates {
         for (kind, id_suffix, score) in reports {
             for app in client.report(kind, *date)? {
-                let (sc, reasons) = score(app.license_type);
+                let (sc, reasons) = score(&app);
                 if sc < 2 {
                     continue;
                 }
@@ -304,6 +305,7 @@ fn fetch_abc(conn: &rusqlite::Connection, since: Option<&str>, today: &str) -> R
                             "license_number": app.license_number,
                             "status": app.status,
                             "license_type": app.license_type,
+                            "action": app.action,
                             "dba": app.dba,
                             "owner": app.owner,
                             "street": app.street,

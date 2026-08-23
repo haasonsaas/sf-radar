@@ -26,6 +26,10 @@ pub struct AbcApplication {
     pub license_number: String,
     pub status: String,
     pub license_type: u32,
+    /// ABC action code: "ORI" original license, "PER" person-to-person
+    /// transfer (same premises, new owner), "PRM" premises transfer (the
+    /// license moves here), "PER/PRM" both. Empty when the report omits it.
+    pub action: String,
     pub dba: String,   // "" when the application has no DBA line
     pub owner: String,
     pub street: String,
@@ -81,29 +85,60 @@ fn license_class(license_type: u32) -> Option<(&'static str, u32)> {
     }
 }
 
-/// Score an application by license type. On-sale eating places and bars are
-/// strong signals; off-sale (shops) are moderate; everything else (wholesale,
-/// importers, caterers, events) is dropped.
-pub fn score_license_type(license_type: u32) -> (u32, Vec<String>) {
-    match license_class(license_type) {
-        Some((class, score)) => (
-            score,
-            vec![format!("liquor license application: type {license_type} ({class})")],
-        ),
-        None => (0, Vec::new()),
+/// What the action code says about the venue: a new license or a license
+/// moving to this address is a new venue; a person-to-person transfer alone
+/// is an ownership change at an existing one (-1).
+fn action_adjustment(action: &str) -> (i32, &'static str) {
+    let a = action.trim().to_uppercase();
+    if a.contains("PRM") {
+        (0, "premises transfer")
+    } else if a == "ORI" {
+        (0, "new license")
+    } else if a == "PER" {
+        (-1, "ownership transfer at existing premises")
+    } else {
+        (0, "")
     }
+}
+
+fn score_with_action(
+    license_type: u32,
+    action: &str,
+    event: &str,
+    bonus: u32,
+) -> (u32, Vec<String>) {
+    let Some((class, base)) = license_class(license_type) else {
+        return (0, Vec::new());
+    };
+    let (adjust, note) = action_adjustment(action);
+    let score = ((base + bonus) as i32 + adjust).max(0) as u32;
+    let mut reason = format!("liquor license {event}: type {license_type} ({class})");
+    if !note.is_empty() {
+        reason.push_str(&format!(", {note}"));
+    }
+    (score, vec![reason])
+}
+
+/// Score an application by license type and action. On-sale eating places
+/// and bars are strong signals; off-sale (shops) are moderate; everything
+/// else (wholesale, importers, caterers, events) is dropped. A person-to-
+/// person transfer at the same premises scores one lower.
+pub fn score_license_type(license_type: u32, action: &str) -> (u32, Vec<String>) {
+    score_with_action(license_type, action, "application", 0)
 }
 
 /// Score an issued license: one point above the application for the same
 /// type — the venue is now licensed to pour, so opening is imminent.
-pub fn score_issued_license_type(license_type: u32) -> (u32, Vec<String>) {
-    match license_class(license_type) {
-        Some((class, score)) => (
-            score + 1,
-            vec![format!("liquor license issued: type {license_type} ({class})")],
-        ),
-        None => (0, Vec::new()),
-    }
+pub fn score_issued_license_type(license_type: u32, action: &str) -> (u32, Vec<String>) {
+    score_with_action(license_type, action, "issued", 1)
+}
+
+pub fn score_application(app: &AbcApplication) -> (u32, Vec<String>) {
+    score_license_type(app.license_type, &app.action)
+}
+
+pub fn score_issued(app: &AbcApplication) -> (u32, Vec<String>) {
+    score_issued_license_type(app.license_type, &app.action)
 }
 
 /* ---------- HTML scanning helpers (no parser dependency) ---------- */
@@ -217,6 +252,7 @@ pub fn parse_report(html: &str) -> Vec<AbcApplication> {
             license_number,
             status: cells[0].clone(),
             license_type,
+            action: cells[5].clone(),
             dba,
             owner,
             street: cells[10].clone(),
