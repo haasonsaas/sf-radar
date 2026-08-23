@@ -261,6 +261,17 @@ pub fn all_addresses(conn: &Connection) -> Result<Vec<(String, String, String, S
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
+/// (address, neighborhood) for every signal that has both — the source of
+/// neighborhoods inherited by sources whose datasets lack one.
+pub fn neighborhoods_by_address(conn: &Connection) -> Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT address, neighborhood FROM signals
+         WHERE address != '' AND neighborhood != ''",
+    )?;
+    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
 /// Mark digest entries as seen so future digests don't resurface them.
 pub fn mark_seen(conn: &Connection, entries: &[DigestEntry]) -> Result<()> {
     let mut by_source: BTreeMap<&str, Vec<&str>> = BTreeMap::new();

@@ -205,6 +205,61 @@ fn seen_flags(db_path: &std::path::Path) -> (u32, u32) {
     (get("recent"), get("stale"))
 }
 
+/// A permit stored at score 1 (below min-score 2) must surface when an abc
+/// application at the same address corroborates it, and get marked seen.
+/// A lone score-1 row stays unseen — it was never displayed.
+#[test]
+fn corroboration_rescues_sub_threshold_rows() {
+    let dir = temp_dir("rescue");
+    let db_path = dir.join("radar.db");
+    {
+        let conn = db::open(&db_path).unwrap();
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let signal = |source: &'static str, id: &str, address: &str, score: u32, hood: &str| db::Signal {
+            source,
+            external_id: id.to_string(),
+            name: format!("Name {id}"),
+            address: address.to_string(),
+            date: today.clone(),
+            neighborhood: hood.to_string(),
+            raw: "{}".to_string(),
+            score,
+            reasons: vec!["test".to_string()],
+            first_seen: today.clone(),
+            seen: false,
+        };
+        db::upsert_signal(&conn, &signal("permit", "weak-corroborated", "88 Spear St", 1, "FiDi")).unwrap();
+        db::upsert_signal(&conn, &signal("abc", "abc-app", "88 SPEAR ST.", 3, "")).unwrap();
+        db::upsert_signal(&conn, &signal("permit", "weak-alone", "1 Nowhere Rd", 1, "Sunset")).unwrap();
+    }
+
+    let bin = env!("CARGO_BIN_EXE_sf-radar");
+    let out = Command::new(bin)
+        .args(["--db"])
+        .arg(&db_path)
+        .args(["digest", "--days", "30", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let ids: Vec<&str> = v["entries"].as_array().unwrap().iter().map(|e| e["id"].as_str().unwrap()).collect();
+    assert!(ids.contains(&"weak-corroborated"), "rescued by +2 address bonus: {ids:?}");
+    assert!(ids.contains(&"abc-app"));
+    assert!(!ids.contains(&"weak-alone"), "still below threshold: {ids:?}");
+    let abc = v["entries"].as_array().unwrap().iter().find(|e| e["id"] == "abc-app").unwrap();
+    assert_eq!(abc["neighborhood"], "FiDi", "abc inherits the permit's neighborhood");
+
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let seen = |id: &str| -> u32 {
+        conn.query_row("SELECT seen FROM signals WHERE external_id=?1", [id], |r| r.get(0)).unwrap()
+    };
+    assert_eq!(seen("weak-corroborated"), 1);
+    assert_eq!(seen("abc-app"), 1);
+    assert_eq!(seen("weak-alone"), 0, "undisplayed rows must not be marked seen");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn dry_run_leaves_seen_flags_untouched() {
     let dir = temp_dir("dry-run");
