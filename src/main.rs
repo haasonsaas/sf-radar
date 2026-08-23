@@ -275,42 +275,53 @@ fn fetch_abc(conn: &rusqlite::Connection, since: Option<&str>, today: &str) -> R
 
     let client = abc::AbcClient::new()?;
     let mut stored = 0usize;
+    // Each report day yields two requests: new applications (the earliest
+    // signal) and issued licenses (opening imminent). An issued license is
+    // stored as its own signal ("<license>-issued") so the venue timeline
+    // shows both lifecycle events.
+    let reports = [
+        (abc::ReportKind::NewApplications, "", abc::score_license_type as fn(u32) -> (u32, Vec<String>)),
+        (abc::ReportKind::IssuedLicenses, "-issued", abc::score_issued_license_type),
+    ];
     for date in &dates {
-        for app in client.new_applications(*date)? {
-            let (sc, reasons) = abc::score_license_type(app.license_type);
-            if sc < 2 {
-                continue;
+        for (kind, id_suffix, score) in reports {
+            for app in client.report(kind, *date)? {
+                let (sc, reasons) = score(app.license_type);
+                if sc < 2 {
+                    continue;
+                }
+                db::upsert_signal(
+                    conn,
+                    &db::Signal {
+                        source: "abc",
+                        external_id: format!("{}{id_suffix}", app.license_number),
+                        name: app.name().to_string(),
+                        address: app.street.clone(),
+                        date: date.format("%Y-%m-%d").to_string(),
+                        neighborhood: String::new(),
+                        raw: serde_json::json!({
+                            "report": format!("{kind:?}"),
+                            "license_number": app.license_number,
+                            "status": app.status,
+                            "license_type": app.license_type,
+                            "dba": app.dba,
+                            "owner": app.owner,
+                            "street": app.street,
+                            "city": app.city,
+                            "zip": app.zip,
+                        })
+                        .to_string(),
+                        score: sc,
+                        reasons,
+                        first_seen: today.to_string(),
+                        seen: false,
+                    },
+                )?;
+                stored += 1;
             }
-            db::upsert_signal(
-                conn,
-                &db::Signal {
-                    source: "abc",
-                    external_id: app.license_number.clone(),
-                    name: app.name().to_string(),
-                    address: app.street.clone(),
-                    date: date.format("%Y-%m-%d").to_string(),
-                    neighborhood: String::new(),
-                    raw: serde_json::json!({
-                        "license_number": app.license_number,
-                        "status": app.status,
-                        "license_type": app.license_type,
-                        "dba": app.dba,
-                        "owner": app.owner,
-                        "street": app.street,
-                        "city": app.city,
-                        "zip": app.zip,
-                    })
-                    .to_string(),
-                    score: sc,
-                    reasons,
-                    first_seen: today.to_string(),
-                    seen: false,
-                },
-            )?;
-            stored += 1;
+            // Be polite to the report endpoint between requests.
+            std::thread::sleep(std::time::Duration::from_millis(300));
         }
-        // Be polite to the report endpoint between daily requests.
-        std::thread::sleep(std::time::Duration::from_millis(300));
     }
     db::set_watermark(
         conn,
