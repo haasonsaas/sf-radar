@@ -351,6 +351,7 @@ fn digest_cmd(
         // the neighborhood filter is applied after inheritance, below.
         let floor = digest::selection_floor(min_score);
         let mut entries = db::unseen_signals(&conn, &cutoff, &today(), floor, None)?;
+        entries.retain(|e| e.score >= min_score || digest::rescue_eligible(&e.source));
         // Display-time corroboration: +2 for other sources at the same
         // address, +1 for other sources under the same name. Not persisted.
         let rows = db::all_addresses(&conn)?;

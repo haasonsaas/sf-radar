@@ -251,6 +251,8 @@ fn corroboration_rescues_sub_threshold_rows() {
         db::upsert_signal(&conn, &signal("permit", "weak-corroborated", "88 Spear St", 1, "FiDi")).unwrap();
         db::upsert_signal(&conn, &signal("abc", "abc-app", "88 SPEAR ST.", 3, "")).unwrap();
         db::upsert_signal(&conn, &signal("permit", "weak-alone", "1 Nowhere Rd", 1, "Sunset")).unwrap();
+        // An office tenant's DBA in the same building is not rescuable.
+        db::upsert_signal(&conn, &signal("business", "office-tenant", "88 Spear St Ste 900", 1, "FiDi")).unwrap();
     }
 
     let bin = env!("CARGO_BIN_EXE_sf-radar");
@@ -266,6 +268,7 @@ fn corroboration_rescues_sub_threshold_rows() {
     assert!(ids.contains(&"weak-corroborated"), "rescued by +2 address bonus: {ids:?}");
     assert!(ids.contains(&"abc-app"));
     assert!(!ids.contains(&"weak-alone"), "still below threshold: {ids:?}");
+    assert!(!ids.contains(&"office-tenant"), "business rows are not rescue-eligible: {ids:?}");
     let abc = v["entries"].as_array().unwrap().iter().find(|e| e["id"] == "abc-app").unwrap();
     assert_eq!(abc["neighborhood"], "FiDi", "abc inherits the permit's neighborhood");
 
@@ -276,6 +279,7 @@ fn corroboration_rescues_sub_threshold_rows() {
     assert_eq!(seen("weak-corroborated"), 1);
     assert_eq!(seen("abc-app"), 1);
     assert_eq!(seen("weak-alone"), 0, "undisplayed rows must not be marked seen");
+    assert_eq!(seen("office-tenant"), 0);
 
     std::fs::remove_dir_all(&dir).ok();
 }

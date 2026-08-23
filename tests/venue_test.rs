@@ -112,6 +112,14 @@ fn json_has_venues_and_flat_entries_agree() {
 }
 
 #[test]
+fn venue_name_falls_back_to_address_then_placeholder() {
+    let entries = vec![entry("permit", "P1", "", "88 Spear St", "2026-08-01", 3)];
+    assert_eq!(cluster(&entries, &no_history())[0].name, "88 Spear St");
+    let entries = vec![entry("mobile_food", "M1", "", "", "2026-08-01", 3)];
+    assert_eq!(cluster(&entries, &no_history())[0].name, "(unnamed)");
+}
+
+#[test]
 fn prose_renders_venue_block() {
     let entries = vec![
         entry("abc", "A1", "ALTO 88", "88 Spear St", "2026-08-21", 5),
