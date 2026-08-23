@@ -16,6 +16,7 @@ fn entry(source: &str, id: &str, score: u32) -> DigestEntry {
         score,
         reasons: vec!["test reason".to_string()],
         description: None,
+        url: String::new(),
     }
 }
 
@@ -64,6 +65,24 @@ fn json_shape_has_exact_keys() {
     assert_eq!(entry["reasons"], serde_json::json!(["test reason"]));
     assert_eq!(entry["url"], "");
     assert_eq!(entry["description"], "");
+}
+
+#[test]
+fn json_and_prose_include_entry_url() {
+    let mut e = entry("abc", "681355", 3);
+    e.url = digest::url_for("abc", "681355");
+
+    let out = digest::render_json(&[e.clone()], 2, 30, 0);
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(
+        v["entries"][0]["url"],
+        "https://www.abc.ca.gov/licensing/license-lookup/single-license/?RPTTYPE=12&LICENSE=681355"
+    );
+
+    let plain = digest::render(&[e.clone()], 2, false, 7);
+    assert!(plain.contains("\n    https://www.abc.ca.gov/"), "plain text lists the url on its own line");
+    let md = digest::render(&[e], 2, true, 7);
+    assert!(md.contains("[Name 681355](https://www.abc.ca.gov/"), "markdown links the name");
 }
 
 #[test]

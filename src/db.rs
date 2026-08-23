@@ -217,11 +217,13 @@ pub fn unseen_signals(
         params![min_score, cutoff, max_date, neighborhood_pattern(neighborhood)],
         |r| {
             let source: String = r.get(0)?;
+            let id: String = r.get(1)?;
             let raw: String = r.get(8)?;
             Ok(DigestEntry {
                 description: crate::digest::description_snippet(&source, &raw),
+                url: crate::digest::url_for(&source, &id),
                 source: r.get(0)?,
-                id: r.get(1)?,
+                id,
                 name: r.get(2)?,
                 address: r.get(3)?,
                 date: r.get(4)?,

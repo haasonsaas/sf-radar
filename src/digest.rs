@@ -32,6 +32,22 @@ pub struct DigestEntry {
     pub score: u32,
     pub reasons: Vec<String>,
     pub description: Option<String>, // permit description snippet, if any
+    pub url: String,                 // per-row page where the source has one, else ""
+}
+
+/// Per-row page for sources that have one. Built from the id alone so it
+/// works for every stored row, not just ones fetched after this was added.
+pub fn url_for(source: &str, id: &str) -> String {
+    match source {
+        "abc" => format!(
+            "https://www.abc.ca.gov/licensing/license-lookup/single-license/?RPTTYPE=12&LICENSE={id}"
+        ),
+        "permit" => format!(
+            "https://dbiweb02.sfgov.org/dbipts/default.aspx?page=Permit&PermitNumber={id}"
+        ),
+        "planning" => format!("https://sfplanninggis.org/pim?search={id}"),
+        _ => String::new(),
+    }
 }
 
 /// Extract a one-line description snippet from a stored `raw` JSON row.
@@ -106,9 +122,14 @@ fn format_entry(entry: &DigestEntry, markdown: bool) -> String {
     };
     let desc = entry.description.as_deref().unwrap_or("");
     let mut out = if markdown {
+        let name = if entry.url.is_empty() {
+            entry.name.clone()
+        } else {
+            format!("[{}]({})", entry.name, entry.url)
+        };
         format!(
             "- **[{}] {}** — {} — {} — score {}\n  - {}",
-            entry.source, entry.name, address, entry.date, entry.score, reasons
+            entry.source, name, address, entry.date, entry.score, reasons
         )
     } else {
         format!(
@@ -122,6 +143,9 @@ fn format_entry(entry: &DigestEntry, markdown: bool) -> String {
         } else {
             out.push_str(&format!("\n    {desc}"));
         }
+    }
+    if !markdown && !entry.url.is_empty() {
+        out.push_str(&format!("\n    {}", entry.url));
     }
     out
 }
@@ -243,8 +267,9 @@ pub struct JsonDigest {
 }
 
 /// Machine-readable digest, same entry order as the prose digest (best
-/// first). Buckets use the post-corroboration score. `url` is always empty
-/// (this tool has no per-row URL); `description` is the permit snippet or "".
+/// first). Buckets use the post-corroboration score. `url` is the per-row
+/// page where the source has one (see `url_for`), else ""; `description`
+/// is the permit snippet or "".
 pub fn render_json(entries: &[DigestEntry], min_score: u32, days: u32, archived: usize) -> String {
     let entries = ordered(entries, min_score)
         .into_iter()
@@ -258,7 +283,7 @@ pub fn render_json(entries: &[DigestEntry], min_score: u32, days: u32, archived:
             score: e.score,
             bucket: bucket_for(e.score).map_or("watch", Bucket::as_str).to_string(),
             reasons: e.reasons.clone(),
-            url: String::new(),
+            url: e.url.clone(),
             description: e.description.clone().unwrap_or_default(),
         })
         .collect();

@@ -55,7 +55,7 @@ Data is stored in `~/.local/share/sf-radar/radar.db` (override with `--db`). Tra
 
 ## Automation
 
-`digest --json` emits the digest as machine-readable JSON on stdout (conflicts with `--md`). Entries are ordered best-first, same as the prose digest; `score` and `bucket` include the display-time corroboration/name bonuses. `url` is always `""` (this tool has no per-row URL) and `description` is the permit-description snippet, or `""` when the source has none.
+`digest --json` emits the digest as machine-readable JSON on stdout (conflicts with `--md`). Entries are ordered best-first, same as the prose digest; `score` and `bucket` include the display-time corroboration/name bonuses. `url` is the per-row page where the source has one — ABC license lookup for `abc`, the DBI permit tracker for `permit`, the Planning PIM page for `planning` — and `""` otherwise. `description` is the permit-description snippet, or `""` when the source has none. The prose digest prints the URL on its own line; the markdown digest links the name.
 
 ```json
 {

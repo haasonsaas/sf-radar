@@ -24,6 +24,28 @@ fn signal(source: &'static str, id: &str, neighborhood: &str) -> db::Signal {
 }
 
 #[test]
+fn unseen_signals_carry_per_row_urls() {
+    let conn = test_conn();
+    db::upsert_signal(&conn, &signal("abc", "681355", "")).unwrap();
+    db::upsert_signal(&conn, &signal("permit", "202606173379", "")).unwrap();
+    db::upsert_signal(&conn, &signal("planning", "2026-006993PRJ", "")).unwrap();
+    db::upsert_signal(&conn, &signal("business", "B1", "")).unwrap();
+
+    let hits = db::unseen_signals(&conn, "2026-01-01", "2026-12-31", 2, None).unwrap();
+    let url = |id: &str| hits.iter().find(|e| e.id == id).unwrap().url.clone();
+    assert_eq!(
+        url("681355"),
+        "https://www.abc.ca.gov/licensing/license-lookup/single-license/?RPTTYPE=12&LICENSE=681355"
+    );
+    assert_eq!(
+        url("202606173379"),
+        "https://dbiweb02.sfgov.org/dbipts/default.aspx?page=Permit&PermitNumber=202606173379"
+    );
+    assert_eq!(url("2026-006993PRJ"), "https://sfplanninggis.org/pim?search=2026-006993PRJ");
+    assert_eq!(url("B1"), "", "sources without a per-row page stay empty");
+}
+
+#[test]
 fn neighborhood_filter_matches_substring() {
     let conn = test_conn();
     db::upsert_signal(&conn, &signal("business", "1", "Mission Bay")).unwrap();
