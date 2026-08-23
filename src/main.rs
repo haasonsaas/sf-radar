@@ -335,7 +335,7 @@ fn digest_cmd(
         .format("%Y-%m-%d")
         .to_string();
 
-    let entries = {
+    let (entries, addresses) = {
         // Select below min_score so corroboration can lift sub-threshold rows;
         // the neighborhood filter is applied after inheritance, below.
         let floor = digest::selection_floor(min_score);
@@ -351,11 +351,11 @@ fn digest_cmd(
             let filter = filter.to_lowercase();
             entries.retain(|e| e.neighborhood.to_lowercase().contains(&filter));
         }
-        entries
+        (entries, addresses)
     };
     // Only what the digest actually shows gets marked seen; rows selected
     // under the floor but still below min_score stay unseen for a later run.
-    let shown: Vec<digest::DigestEntry> = digest::ordered(&entries, min_score)
+    let shown: Vec<digest::DigestEntry> = digest::ordered_with(&entries, min_score, &addresses)
         .into_iter()
         .cloned()
         .collect();
@@ -369,9 +369,9 @@ fn digest_cmd(
     };
 
     if json {
-        println!("{}", digest::render_json(&entries, min_score, days, archived));
+        println!("{}", digest::render_json_with(&entries, min_score, days, archived, &addresses));
     } else {
-        print!("{}", digest::render(&entries, min_score, md, days));
+        print!("{}", digest::render_with(&entries, min_score, md, days, &addresses));
         if archived > 0 {
             println!("(archived {archived} signals older than the window)");
         }
