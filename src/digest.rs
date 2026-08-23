@@ -96,6 +96,7 @@ fn truncate(s: &str, max: usize) -> String {
 pub enum Bucket {
     Strong, // score >= 4
     Watch,  // score 2-3
+    Low,    // score 0-1: only rendered when --min-score is below 2
 }
 
 impl Bucket {
@@ -103,6 +104,7 @@ impl Bucket {
         match self {
             Bucket::Strong => "🔥 Strong signals",
             Bucket::Watch => "👀 Worth watching",
+            Bucket::Low => "· Low signals",
         }
     }
 
@@ -110,15 +112,19 @@ impl Bucket {
         match self {
             Bucket::Strong => "strong",
             Bucket::Watch => "watch",
+            Bucket::Low => "low",
         }
     }
 }
+
+/// Display order, strongest first.
+pub const BUCKETS: [Bucket; 3] = [Bucket::Strong, Bucket::Watch, Bucket::Low];
 
 pub fn bucket_for(score: u32) -> Option<Bucket> {
     match score {
         4.. => Some(Bucket::Strong),
         2..=3 => Some(Bucket::Watch),
-        _ => None,
+        _ => Some(Bucket::Low),
     }
 }
 
@@ -336,7 +342,7 @@ fn grouped<'a>(entries: &'a [DigestEntry], min_score: u32, addresses: &AddressIn
 
     let venues = cluster(entries, addresses);
     let mut out = Vec::new();
-    for bucket in [Bucket::Strong, Bucket::Watch] {
+    for bucket in BUCKETS {
         let mut by_hood: BTreeMap<String, Vec<Venue<'a>>> = BTreeMap::new();
         for venue in venues
             .iter()
@@ -546,7 +552,7 @@ fn json_entry(e: &DigestEntry) -> JsonEntry {
         neighborhood: e.neighborhood.clone(),
         date: e.date.clone(),
         score: e.score,
-        bucket: bucket_for(e.score).map_or("watch", Bucket::as_str).to_string(),
+        bucket: bucket_for(e.score).map_or("low", Bucket::as_str).to_string(),
         reasons: e.reasons.clone(),
         url: e.url.clone(),
         description: e.description.clone().unwrap_or_default(),
@@ -568,7 +574,7 @@ pub fn render_json_with(entries: &[DigestEntry], min_score: u32, days: u32, arch
             neighborhood: v.neighborhood.clone(),
             date: v.date.clone(),
             score: v.score,
-            bucket: bucket_for(v.score).map_or("watch", Bucket::as_str).to_string(),
+            bucket: bucket_for(v.score).map_or("low", Bucket::as_str).to_string(),
             filings: v.entries.iter().map(|e| json_entry(e)).collect(),
             history: v
                 .history
