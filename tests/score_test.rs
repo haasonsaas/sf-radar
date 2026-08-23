@@ -271,8 +271,8 @@ fn vending_food_bonus() {
 
 #[test]
 fn bucket_boundaries() {
-    assert_eq!(bucket_for(0), None);
-    assert_eq!(bucket_for(1), None);
+    assert_eq!(bucket_for(0), Some(Bucket::Low));
+    assert_eq!(bucket_for(1), Some(Bucket::Low));
     assert_eq!(bucket_for(2), Some(Bucket::Watch));
     assert_eq!(bucket_for(3), Some(Bucket::Watch));
     assert_eq!(bucket_for(4), Some(Bucket::Strong));
@@ -327,6 +327,18 @@ fn digest_min_score_filter() {
     let entries = vec![entry("low", "Mission", "2026-07-01", 2)];
     let text = render(&entries, 4, false, 7);
     assert!(text.contains("No new signals."));
+}
+
+#[test]
+fn low_bucket_renders_only_below_default_min_score() {
+    let entries = vec![entry("faint", "Mission", "2026-07-01", 1)];
+    // Default threshold: nothing.
+    assert!(render(&entries, 2, false, 7).contains("No new signals."));
+    // --min-score 1: the Low bucket appears, after Strong/Watch.
+    let text = render(&entries, 1, false, 7);
+    assert!(text.contains("· Low signals\n"), "{text}");
+    assert!(text.contains("faint — 1 faint St · score 1"), "{text}");
+    assert!(!text.contains("Worth watching"), "empty buckets are not printed");
 }
 
 #[test]
