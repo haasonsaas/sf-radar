@@ -6,19 +6,58 @@
 /// Unit designators: cut the address at the first one (building-level match).
 const UNIT_TOKENS: &[&str] = &["APT", "UNIT", "STE", "SUITE", "RM", "FL", "#"];
 
-/// Trailing street-suffix canonicalization.
+/// Trailing street-suffix canonicalization. Covers the spelled-out forms,
+/// USPS abbreviations, and DBI's two-letter permit abbreviations ("Bl",
+/// "Wy", "Hy", "Tr") — ABC and business registrations use the long forms.
 fn canonical_suffix(token: &str) -> &str {
     match token {
         "STREET" => "ST",
         "AVENUE" | "AV" => "AVE",
-        "BOULEVARD" => "BLVD",
+        "BOULEVARD" | "BL" => "BLVD",
         "DRIVE" => "DR",
         "ROAD" => "RD",
         "LANE" => "LN",
         "PLACE" => "PL",
         "COURT" => "CT",
-        "TERRACE" => "TER",
+        "TERRACE" | "TR" => "TER",
+        "HIGHWAY" | "HY" => "HWY",
+        "WY" => "WAY",
+        "CIRCLE" | "CI" => "CIR",
+        "PARKWAY" | "PW" => "PKWY",
+        "ALLEY" | "AL" => "ALY",
         other => other,
+    }
+}
+
+/// House-number canonicalization for the leading token: spelled-out numbers
+/// ("ONE SANSOME ST" vs "1 Sansome St") and hyphenated ranges ("88-90 SPEAR
+/// ST" vs "88 Spear St") both collapse to the first digit form.
+fn canonical_house_number(token: &str) -> &str {
+    match token {
+        "ONE" => "1",
+        "TWO" => "2",
+        "THREE" => "3",
+        "FOUR" => "4",
+        "FIVE" => "5",
+        "SIX" => "6",
+        "SEVEN" => "7",
+        "EIGHT" => "8",
+        "NINE" => "9",
+        "TEN" => "10",
+        other => {
+            let bytes = other.as_bytes();
+            // "88-90" -> "88"; requires digits on both sides of the hyphen.
+            if let Some(dash) = other.find('-')
+                && dash > 0
+                && bytes[..dash].iter().all(u8::is_ascii_digit)
+                && bytes[dash + 1..].iter().all(u8::is_ascii_digit)
+                && dash + 1 < bytes.len()
+            {
+                &other[..dash]
+            } else {
+                other
+            }
+        }
     }
 }
 
@@ -71,6 +110,9 @@ pub fn normalize(addr: &str) -> String {
     let mut tokens: Vec<&str> = tokens[..unit_at].to_vec();
     for t in tokens.iter_mut() {
         *t = canonical_ordinal(t);
+    }
+    if let Some(first) = tokens.first_mut() {
+        *first = canonical_house_number(first);
     }
     if let Some(last) = tokens.last_mut() {
         *last = canonical_suffix(last);
