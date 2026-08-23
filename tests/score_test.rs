@@ -290,6 +290,7 @@ fn entry(name: &str, hood: &str, date: &str, score: u32) -> DigestEntry {
         score,
         reasons: vec!["test reason".to_string()],
         description: None,
+        url: String::new(),
     }
 }
 

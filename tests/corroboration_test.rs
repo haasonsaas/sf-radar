@@ -72,6 +72,7 @@ fn entry(source: &str, address: &str) -> DigestEntry {
         score: 2,
         reasons: Vec::new(),
         description: None,
+        url: String::new(),
     }
 }
 
