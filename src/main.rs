@@ -114,119 +114,147 @@ fn fetch(db_path: &std::path::Path, since: Option<String>, full: bool) -> Result
 
     let today = today();
     let mut total = 0usize;
+    // One source failing (dataset outage, schema change) must not stop the
+    // others from fetching; failures are collected and reported at the end.
+    let mut failures: Vec<String> = Vec::new();
     for source in sources::all() {
-        let watermark_key = format!("watermark:{}", source.key);
-        let stored_watermark = db::get_watermark(&conn, &watermark_key)?;
-        let backfill_from = || {
-            source
-                .backfill_start
-                .map(str::to_string)
-                .unwrap_or_else(|| days_ago(FULL_BACKFILL_DAYS))
-        };
-        // Quiet backfill: only on the very first fetch of this source (no
-        // stored watermark) and not for explicit --since runs.
-        let quiet = source.quiet_backfill && stored_watermark.is_none() && since.is_none();
-
-        let (rows, effective_since) = match source.date_field {
-            Some(date_field) => {
-                let effective_since = if let Some(s) = &since {
-                    s.clone()
-                } else if full {
-                    backfill_from()
-                } else {
-                    stored_watermark.clone().unwrap_or_else(backfill_from)
-                };
-                println!(
-                    "Fetching {} since {} ...",
-                    source.key,
-                    effective_since.get(..10).unwrap_or(&effective_since)
-                );
-                let rows = client.fetch_since(source.dataset, date_field, &effective_since)?;
-                (rows, Some(effective_since))
+        match fetch_source(&conn, &client, &source, since.as_deref(), full, &today) {
+            Ok(stored) => total += stored,
+            Err(e) => {
+                eprintln!("  {} failed, skipping: {e:#}", source.key);
+                failures.push(source.key.to_string());
             }
-            None => {
-                println!("Fetching {} (snapshot, full dataset) ...", source.key);
-                (client.fetch_all(source.dataset)?, None)
-            }
-        };
-
-        let mut max_date = effective_since
-            .as_deref()
-            .map(db::normalize_date)
-            .unwrap_or_default();
-        let mut stored = 0usize;
-        for row in &rows {
-            // Advance the watermark over every fetched row, even ones we don't store.
-            if let Some(date_field) = source.date_field {
-                let d = score::field(row, date_field);
-                if !d.is_empty() {
-                    let d = db::normalize_date(d);
-                    if d > max_date {
-                        max_date = d;
-                    }
-                }
-            }
-
-            let external_id = (source.external_id)(row);
-            if external_id.trim_matches('-').is_empty() {
-                continue;
-            }
-            let (sc, reasons) = (source.score)(row, &conn);
-            if sc < source.min_store_score {
-                continue;
-            }
-            let date = match source.date_field {
-                Some(date_field) => db::normalize_date(score::field(row, date_field)),
-                None => today.clone(), // snapshot: date = first_seen
-            };
-            db::upsert_signal(
-                &conn,
-                &db::Signal {
-                    source: source.key,
-                    external_id,
-                    name: (source.name)(row),
-                    address: (source.address)(row),
-                    date,
-                    neighborhood: (source.neighborhood)(row),
-                    raw: row.to_string(),
-                    score: sc,
-                    reasons,
-                    first_seen: today.clone(),
-                    seen: quiet,
-                },
-            )?;
-            stored += 1;
         }
-
-        if effective_since.is_some() {
-            // Bad source data can carry future dates; never let a watermark
-            // move past today or incremental fetches would skip everything.
-            if max_date > today {
-                max_date.clone_from(&today);
-            }
-            db::set_watermark(&conn, &watermark_key, &max_date)?;
-        }
-        println!(
-            "  {} rows fetched, {stored} stored",
-            rows.len(),
-        );
-        total += stored;
     }
 
-    // ABC liquor licenses come from a scraped HTML report, not Socrata; a
-    // failure there (site change, outage) shouldn't sink the whole fetch.
+    // ABC liquor licenses come from a scraped HTML report, not Socrata.
     match fetch_abc(&conn, since.as_deref(), &today) {
         Ok(stored) => total += stored,
-        Err(e) => eprintln!("  abc fetch failed, skipping this run: {e:#}"),
+        Err(e) => {
+            eprintln!("  abc failed, skipping: {e:#}");
+            failures.push("abc".to_string());
+        }
     }
 
     println!("\nDone — {total} signals stored in {}", db_path.display());
+    if !failures.is_empty() {
+        anyhow::bail!(
+            "{} source(s) failed this run: {} (other sources were fetched and stored)",
+            failures.len(),
+            failures.join(", ")
+        );
+    }
     println!("\nTip: keep the radar warm with cron (`crontab -e`):");
     let exe = std::env::current_exe()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "sf-radar".to_string());
     println!("  0 */6 * * * {exe} fetch --db {} >> /tmp/sf-radar.log 2>&1", db_path.display());
     Ok(())
+}
+
+/// Fetch one Socrata source since its watermark (or the backfill window),
+/// score and store its rows, and advance the watermark. Returns rows stored.
+fn fetch_source(
+    conn: &rusqlite::Connection,
+    client: &socrata::SocrataClient,
+    source: &sources::Source,
+    since: Option<&str>,
+    full: bool,
+    today: &str,
+) -> Result<usize> {
+    let watermark_key = format!("watermark:{}", source.key);
+    let stored_watermark = db::get_watermark(conn, &watermark_key)?;
+    let backfill_from = || {
+        source
+            .backfill_start
+            .map(str::to_string)
+            .unwrap_or_else(|| days_ago(FULL_BACKFILL_DAYS))
+    };
+    // Quiet backfill: only on the very first fetch of this source (no
+    // stored watermark) and not for explicit --since runs.
+    let quiet = source.quiet_backfill && stored_watermark.is_none() && since.is_none();
+
+    let (rows, effective_since) = match source.date_field {
+        Some(date_field) => {
+            let effective_since = if let Some(s) = since {
+                s.to_string()
+            } else if full {
+                backfill_from()
+            } else {
+                stored_watermark.clone().unwrap_or_else(backfill_from)
+            };
+            println!(
+                "Fetching {} since {} ...",
+                source.key,
+                effective_since.get(..10).unwrap_or(&effective_since)
+            );
+            let rows = client.fetch_since(source.dataset, date_field, &effective_since)?;
+            (rows, Some(effective_since))
+        }
+        None => {
+            println!("Fetching {} (snapshot, full dataset) ...", source.key);
+            (client.fetch_all(source.dataset)?, None)
+        }
+    };
+
+    let mut max_date = effective_since
+        .as_deref()
+        .map(db::normalize_date)
+        .unwrap_or_default();
+    let mut stored = 0usize;
+    for row in &rows {
+        // Advance the watermark over every fetched row, even ones we don't store.
+        if let Some(date_field) = source.date_field {
+            let d = score::field(row, date_field);
+            if !d.is_empty() {
+                let d = db::normalize_date(d);
+                if d > max_date {
+                    max_date = d;
+                }
+            }
+        }
+
+        let external_id = (source.external_id)(row);
+        if external_id.trim_matches('-').is_empty() {
+            continue;
+        }
+        let (sc, reasons) = (source.score)(row, conn);
+        if sc < source.min_store_score {
+            continue;
+        }
+        let date = match source.date_field {
+            Some(date_field) => db::normalize_date(score::field(row, date_field)),
+            None => today.to_string(), // snapshot: date = first_seen
+        };
+        db::upsert_signal(
+            conn,
+            &db::Signal {
+                source: source.key,
+                external_id,
+                name: (source.name)(row),
+                address: (source.address)(row),
+                date,
+                neighborhood: (source.neighborhood)(row),
+                raw: row.to_string(),
+                score: sc,
+                reasons,
+                first_seen: today.to_string(),
+                seen: quiet,
+            },
+        )?;
+        stored += 1;
+    }
+
+    if effective_since.is_some() {
+        // Bad source data can carry future dates; never let a watermark
+        // move past today or incremental fetches would skip everything.
+        if max_date.as_str() > today {
+            max_date = today.to_string();
+        }
+        db::set_watermark(conn, &watermark_key, &max_date)?;
+    }
+    println!("  {} rows fetched, {stored} stored", rows.len());
+    Ok(stored)
 }
 
 /// Fetch ABC liquor-license applications (scraped daily reports). One HTTP
@@ -308,21 +336,35 @@ fn digest_cmd(
         .to_string();
 
     let entries = {
-        let mut entries = db::unseen_signals(&conn, &cutoff, &today(), min_score, neighborhood)?;
+        // Select below min_score so corroboration can lift sub-threshold rows;
+        // the neighborhood filter is applied after inheritance, below.
+        let floor = digest::selection_floor(min_score);
+        let mut entries = db::unseen_signals(&conn, &cutoff, &today(), floor, None)?;
         // Display-time corroboration: +2 for other sources at the same
         // address, +1 for other sources under the same name. Not persisted.
         let rows = db::all_addresses(&conn)?;
         let names = digest::NameIndex::build(&rows);
         let addresses = digest::AddressIndex::build(rows);
         digest::apply_corroboration(&mut entries, &addresses, &names);
+        digest::NeighborhoodIndex::build(db::neighborhoods_by_address(&conn)?).fill(&mut entries);
+        if let Some(filter) = neighborhood {
+            let filter = filter.to_lowercase();
+            entries.retain(|e| e.neighborhood.to_lowercase().contains(&filter));
+        }
         entries
     };
+    // Only what the digest actually shows gets marked seen; rows selected
+    // under the floor but still below min_score stay unseen for a later run.
+    let shown: Vec<digest::DigestEntry> = digest::ordered(&entries, min_score)
+        .into_iter()
+        .cloned()
+        .collect();
 
     // --dry-run prints without mutating the database at all.
     let archived = if dry_run {
         0
     } else {
-        db::mark_seen(&conn, &entries)?;
+        db::mark_seen(&conn, &shown)?;
         db::archive_before(&conn, &cutoff, min_score)?
     };
 

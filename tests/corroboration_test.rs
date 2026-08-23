@@ -193,6 +193,35 @@ fn normalize_name_min_length_guard() {
     assert!(!is_matchable(&normalize_name("LLC")));
 }
 
+#[test]
+fn neighborhood_inherited_from_same_address() {
+    use sf_radar::digest::NeighborhoodIndex;
+    let index = NeighborhoodIndex::build(vec![
+        ("88 Spear St, Ste 100".to_string(), "Financial District".to_string()),
+        ("1 Main St".to_string(), "".to_string()), // empty hood: ignored
+    ]);
+    let mut entries = vec![entry("abc", "88 SPEAR ST."), entry("abc", "1 MAIN ST")];
+    entries[0].neighborhood.clear();
+    entries[1].neighborhood = "Already Set".to_string();
+    index.fill(&mut entries);
+    assert_eq!(entries[0].neighborhood, "Financial District");
+    assert_eq!(entries[1].neighborhood, "Already Set", "non-empty is left alone");
+
+    let mut unknown = vec![entry("fire", "999 NOWHERE AVE")];
+    unknown[0].neighborhood.clear();
+    index.fill(&mut unknown);
+    assert_eq!(unknown[0].neighborhood, "");
+}
+
+#[test]
+fn selection_floor_allows_corroboration_rescue() {
+    use sf_radar::digest::selection_floor;
+    assert_eq!(selection_floor(2), 1, "score-1 rows can reach 2 with a +2 bonus");
+    assert_eq!(selection_floor(4), 1);
+    assert_eq!(selection_floor(5), 2);
+    assert_eq!(selection_floor(0), 1, "never below 1");
+}
+
 fn name_entry(source: &str, row_name: &str) -> DigestEntry {
     let mut e = entry(source, "999 Nowhere St");
     e.name = row_name.to_string();

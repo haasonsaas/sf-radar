@@ -7,6 +7,16 @@ pub const CORROBORATION_BONUS: u32 = 2;
 /// Score bonus when other sources have filings under the same name.
 pub const NAME_BONUS: u32 = 1;
 
+/// Stored-score floor for selecting digest candidates: low enough that a row
+/// which display-time corroboration could lift to `min_score` is selected,
+/// but never below 1 (a score-0 row has no signal of its own to corroborate).
+/// The final `min_score` filter is applied after corroboration, in `grouped`.
+pub fn selection_floor(min_score: u32) -> u32 {
+    min_score
+        .saturating_sub(CORROBORATION_BONUS + NAME_BONUS)
+        .max(1)
+}
+
 /// Sources whose `raw` row carries a permit description worth showing.
 const DESCRIPTION_SOURCES: &[&str] = &["permit", "electrical", "plumbing", "planning"];
 const SNIPPET_MAX: usize = 120;
@@ -354,6 +364,44 @@ impl NameIndex {
             return Vec::new();
         }
         corroborators(self.by_name.get(&key), source, 2)
+    }
+}
+
+/// Normalized address -> neighborhood, from every stored signal that has
+/// both. Sources without a neighborhood field (abc, fire, planning, vending)
+/// inherit one from any other filing at the same building.
+pub struct NeighborhoodIndex {
+    by_address: HashMap<String, String>,
+}
+
+impl NeighborhoodIndex {
+    /// `rows` is (address, neighborhood) with both non-empty.
+    pub fn build(rows: Vec<(String, String)>) -> Self {
+        let mut by_address = HashMap::new();
+        for (addr, hood) in rows {
+            let key = address::normalize(&addr);
+            if key.len() >= 5 && !hood.trim().is_empty() {
+                by_address.entry(key).or_insert(hood);
+            }
+        }
+        Self { by_address }
+    }
+
+    pub fn lookup(&self, addr: &str) -> Option<&str> {
+        self.by_address
+            .get(&address::normalize(addr))
+            .map(String::as_str)
+    }
+
+    /// Fill empty neighborhoods in place from same-address signals.
+    pub fn fill(&self, entries: &mut [DigestEntry]) {
+        for e in entries.iter_mut() {
+            if e.neighborhood.is_empty()
+                && let Some(hood) = self.lookup(&e.address)
+            {
+                e.neighborhood = hood.to_string();
+            }
+        }
     }
 }
 
