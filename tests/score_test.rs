@@ -1,8 +1,8 @@
 use serde_json::json;
 use sf_radar::digest::{bucket_for, render, Bucket, DigestEntry};
 use sf_radar::score::{
-    score_business, score_electrical, score_entertainment, score_mobile_food, score_permit,
-    score_plumbing, score_tables_chairs,
+    score_business, score_electrical, score_entertainment, score_fire, score_mobile_food,
+    score_permit, score_planning, score_plumbing, score_tables_chairs, score_vending,
 };
 
 #[test]
@@ -207,6 +207,66 @@ fn tables_chairs_scoring() {
     // Missing flags still store as a generic registration.
     let row = json!({"dbaname": "Z"});
     assert_eq!(score_tables_chairs(&row).0, 2);
+}
+
+#[test]
+fn planning_food_description_scores() {
+    let row = json!({
+        "description": "The project proposes re-establishing the previous Full Service Restaurant use.",
+    });
+    let (score, reasons) = score_planning(&row);
+    assert_eq!(score, 2);
+    assert!(reasons.iter().any(|r| r.contains("restaurant")));
+
+    // Land-use vocabulary the permit list doesn't have.
+    let row = json!({"description": "Establish outdoor dining and takeout food service."});
+    assert_eq!(score_planning(&row).0, 2);
+
+    // Change of use stacks.
+    let row = json!({"description": "Change of use from office to cafe."});
+    assert_eq!(score_planning(&row).0, 3);
+
+    // Housing projects score 0 (and are dropped at ingest).
+    let row = json!({"description": "New construction of a 24-unit residential building."});
+    assert_eq!(score_planning(&row).0, 0);
+
+    // "rebar" must not trip the bar keyword here either.
+    let row = json!({"description": "Structural upgrade with new rebar."});
+    assert_eq!(score_planning(&row).0, 0);
+}
+
+#[test]
+fn fire_place_of_assembly_scoring() {
+    let row = json!({"permit_type_description": "place of assembly, operation"});
+    let (score, reasons) = score_fire(&row);
+    assert_eq!(score, 3);
+    assert!(reasons.iter().any(|r| r.contains("place of assembly")));
+
+    let row = json!({"permit_type_description": "outdoor place of assembly"});
+    assert_eq!(score_fire(&row).0, 3);
+
+    // Temporary/special-event variants are noise.
+    for ty in [
+        "place of assembly, temporary / special, operation",
+        "open flame, use, temporary",
+        "hot work operations, welder, cut, weld, grind, braze, solder, conduct",
+    ] {
+        let row = json!({"permit_type_description": ty});
+        assert_eq!(score_fire(&row).0, 0, "{ty:?} should not score");
+    }
+}
+
+#[test]
+fn vending_food_bonus() {
+    let row = json!({"dbaname": "X", "whatwillyoubeselling": "merchandise",
+                     "describewhatyouwillsell": "selling new and used books"});
+    assert_eq!(score_vending(&row).0, 2);
+
+    let row = json!({"dbaname": "Y", "whatwillyoubeselling": "",
+                     "describewhatyouwillsell": "hot dogs and drinks"});
+    let (score, reasons) = score_vending(&row);
+    assert_eq!(score, 3);
+    assert!(reasons.iter().any(|r| r.contains("food vendor")));
 }
 
 #[test]

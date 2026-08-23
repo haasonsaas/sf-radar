@@ -73,6 +73,33 @@ fn no_neighborhood(_row: &Value) -> String {
     String::new()
 }
 
+/// Planning project addresses carry a trailing zip ("524 UNION ST 94133");
+/// strip it so address corroboration matches other sources' addresses.
+fn address_without_zip(row: &Value, key: &str) -> String {
+    let addr = field(row, key);
+    let tokens: Vec<&str> = addr.split_whitespace().collect();
+    match tokens.split_last() {
+        Some((last, rest)) if last.len() == 5 && last.bytes().all(|b| b.is_ascii_digit()) => {
+            rest.join(" ")
+        }
+        _ => tokens.join(" "),
+    }
+}
+
+/// Street vendors have no street number — describe the pitch as
+/// "street & cross street" (not corroboratable, but readable).
+fn vending_address(row: &Value) -> String {
+    let street = field(row, "vendinglocationstreet");
+    let cross = field(row, "vendinglocationcrossstreet");
+    if street.is_empty() {
+        String::new()
+    } else if cross.is_empty() {
+        street.to_string()
+    } else {
+        format!("{street} & {cross}")
+    }
+}
+
 /// Health inspections: +3 only when this is the first inspection since 2024
 /// for the permit_number (i.e. nothing stored for it yet — ingest runs in
 /// inspection_date order, so any stored row for the permit is earlier).
@@ -161,6 +188,59 @@ pub fn all() -> Vec<Source> {
             address: |r| f(r, "address"),
             neighborhood: no_neighborhood,
             score: |r, _conn| score::score_mobile_food(r),
+        },
+        Source {
+            key: "planning",
+            dataset: "qvu5-m3a2",
+            backfill_start: None,
+            quiet_backfill: false,
+            date_field: Some("open_date"),
+            min_store_score: 2, // most planning records are housing projects
+            external_id: |r| f(r, "record_id"),
+            name: |r| {
+                let name = field(r, "project_name");
+                if name.is_empty() {
+                    f(r, "record_id")
+                } else {
+                    name.to_string()
+                }
+            },
+            address: |r| address_without_zip(r, "project_address"),
+            neighborhood: no_neighborhood,
+            score: |r, _conn| score::score_planning(r),
+        },
+        Source {
+            key: "fire",
+            dataset: "893e-xam6",
+            backfill_start: None,
+            quiet_backfill: false,
+            date_field: Some("permit_application_date"),
+            min_store_score: 2, // only standing place-of-assembly / cooking permits
+            external_id: |r| f(r, "permit_number"),
+            name: |r| {
+                let dba = field(r, "dba_name_associated_with_this_permit_holder");
+                if dba.is_empty() {
+                    f(r, "permit_holder")
+                } else {
+                    dba.to_string()
+                }
+            },
+            address: |r| f(r, "permit_address"),
+            neighborhood: no_neighborhood,
+            score: |r, _conn| score::score_fire(r),
+        },
+        Source {
+            key: "vending",
+            dataset: "34ws-kyf6",
+            backfill_start: None,
+            quiet_backfill: false,
+            date_field: None, // snapshot
+            min_store_score: 0,
+            external_id: |r| f(r, "id"),
+            name: |r| f(r, "dbaname"),
+            address: vending_address,
+            neighborhood: |r| f(r, "analysis_neighborhood"),
+            score: |r, _conn| score::score_vending(r),
         },
         Source {
             key: "tables_chairs",

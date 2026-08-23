@@ -8,7 +8,7 @@ pub const CORROBORATION_BONUS: u32 = 2;
 pub const NAME_BONUS: u32 = 1;
 
 /// Sources whose `raw` row carries a permit description worth showing.
-const DESCRIPTION_SOURCES: &[&str] = &["permit", "electrical", "plumbing"];
+const DESCRIPTION_SOURCES: &[&str] = &["permit", "electrical", "plumbing", "planning"];
 const SNIPPET_MAX: usize = 120;
 
 #[derive(Debug, Clone)]

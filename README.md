@@ -14,6 +14,9 @@ Rows from multiple SF open-data sources are deduped into a local SQLite database
 | `health` | `tvy3-wexg` Health Inspections 2024+ | A business's first health inspection since 2024 — usually means it's about to open |
 | `mobile_food` | `rqzj-sfat` Mobile Food Facility Permits | New food trucks and carts |
 | `tables_chairs` | `dpch-7nr4` Table and Chairs Registrations (Shared Spaces) | Sidewalk seating/display registrations — outdoor tables mean food service |
+| `planning` | `qvu5-m3a2` Planning Department Records - Projects | Planning applications with food/retail descriptions — the earliest signal, months before permits |
+| `fire` | `893e-xam6` Fire Permits | Standing place-of-assembly permits — venues licensing 50+ occupancy |
+| `vending` | `34ws-kyf6` Street Vending Permits | New sidewalk vendors (snapshot dataset, no date field) |
 | `electrical` | `ftty-kx6y` Electrical Permits | Kitchen/restaurant wiring buildouts |
 | `plumbing` | `a6aw-rudh` Plumbing Permits | Grease traps and restaurant plumbing buildouts |
 
@@ -107,6 +110,9 @@ Cron example — fetch every 6 hours, mail a weekly JSON digest of strong signal
 - **Health inspections**: +3 for a permit number's first inspection since 2024 (routine re-inspections are dropped at ingest). The initial 2024–now backfill is stored pre-seen — every existing facility has a "first since 2024", so only first-inspections found by incremental fetches after the radar is live alert
 - **Mobile food**: +2 base, +1 for trucks
 - **Tables & chairs (Shared Spaces)**: +3 for a sidewalk tables-and-chairs registration (outdoor seating means food service), +2 for a merchandise-display registration
+- **Planning applications**: +2 for food/retail keywords in the project description (including planning vocabulary: food service, takeout, outdoor dining, formula retail), +1 for "change of use"; only rows scoring ≥ 2 are stored (most planning records are housing). Keyword matching can't tell "change of use to restaurant" from "change of use from retail to office" — read the description snippet
+- **Fire permits**: +3 for a standing place-of-assembly or commercial-cooking permit; temporary/special-event permits score 0 and are not stored. Standing permits renew annually, so the first fetch cycle surfaces some renewals of existing venues alongside genuinely new ones
+- **Street vending**: +2 base, +1 when the goods description reads as food
 - **Electrical / plumbing permits**: +2 for strong buildout keywords (restaurant, food service, cafe, cafeteria, bakery, commercial kitchen, espresso, brewery, taproom, pizza oven, walk-in cooler/freezer, type 1 hood — plus "grease" for plumbing, and "bar" as a standalone word excluding wet/grab/towel bar), +1 for "kitchen" alone, +1 for valuation over $50k; only rows scoring ≥ 2 are stored
 
 **Corroboration**: at digest time, an entry gets +2 when other sources have filings at the same address (addresses are normalized across formats — case, whitespace, ST/STREET, 1ST/FIRST, unit designators stripped), and +1 when other sources have filings under the same name (names normalized — case, punctuation, entity suffixes like LLC/INC dropped; minimum length 4). Name matches catch pairs whose addresses don't normalize equal, like a food truck's commissary vs its storefront. Corroboration matches against full DB history including already-seen rows, and the bonuses are display-only — stored scores are untouched.

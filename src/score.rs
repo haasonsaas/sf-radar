@@ -154,6 +154,82 @@ pub fn score_entertainment(row: &Value) -> (u32, Vec<String>) {
     (score, reasons)
 }
 
+/// Extra keywords for Planning records — planning descriptions use land-use
+/// vocabulary the permit list doesn't.
+const PLANNING_EXTRA_KEYWORDS: &[&str] = &[
+    "food service",
+    "takeout",
+    "take-out",
+    "outdoor dining",
+    "nighttime entertainment",
+    "formula retail",
+];
+
+/// Score a Planning Department project record. These file months before any
+/// building permit, so a food/retail description is the earliest signal in
+/// the pipeline. Only rows scoring >= 2 are stored (most PRJs are housing).
+pub fn score_planning(row: &Value) -> (u32, Vec<String>) {
+    let mut score = 0;
+    let mut reasons = Vec::new();
+    let desc = field(row, "description").to_lowercase();
+
+    let mut hits: Vec<&str> = PERMIT_KEYWORDS
+        .iter()
+        .chain(PLANNING_EXTRA_KEYWORDS.iter())
+        .copied()
+        .filter(|k| desc.contains(k))
+        .collect();
+    if has_bar_keyword(&desc) {
+        hits.push("bar");
+    }
+    if !hits.is_empty() {
+        score += 2;
+        reasons.push(format!("planning application keyword: {}", hits.join(", ")));
+    }
+    if desc.contains("change of use") {
+        score += 1;
+        reasons.push("change of use".to_string());
+    }
+    (score, reasons)
+}
+
+/// Score a Fire Department permit. Standing place-of-assembly permits mean a
+/// venue/restaurant with 50+ occupancy is being licensed to operate; the
+/// temporary/special-event variants are noise and score 0. Only rows scoring
+/// >= 2 are stored.
+pub fn score_fire(row: &Value) -> (u32, Vec<String>) {
+    let ty = field(row, "permit_type_description").to_lowercase();
+    let standing_assembly =
+        ty.contains("place of assembly") && !ty.contains("temporary") && !ty.contains("special");
+    if standing_assembly || ty.contains("commercial cooking") || ty.contains("hood") {
+        (3, vec![format!("fire permit: {ty}")])
+    } else {
+        (0, Vec::new())
+    }
+}
+
+const VENDING_FOOD_KEYWORDS: &[&str] = &[
+    "food", "coffee", "drink", "juice", "taco", "hot dog", "fruit", "snack", "dessert", "ice cream",
+];
+
+/// Score a street vending permit (snapshot dataset — new rows surface on
+/// first appearance). +1 when the goods description reads as food.
+pub fn score_vending(row: &Value) -> (u32, Vec<String>) {
+    let mut score = 2;
+    let mut reasons = vec!["street vending permit".to_string()];
+    let goods = format!(
+        "{} {}",
+        field(row, "whatwillyoubeselling"),
+        field(row, "describewhatyouwillsell")
+    )
+    .to_lowercase();
+    if VENDING_FOOD_KEYWORDS.iter().any(|k| goods.contains(k)) {
+        score += 1;
+        reasons.push("food vendor".to_string());
+    }
+    (score, reasons)
+}
+
 /// Score a Shared Spaces sidewalk registration (tables & chairs / display
 /// merchandise). Sidewalk seating is a food-service tell; a merchandise
 /// display is retail. Booleans arrive as real JSON booleans, not strings.
